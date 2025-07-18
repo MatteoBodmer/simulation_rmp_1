@@ -1,0 +1,40 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>simulation_rmp</name>
+  <version>0.0.0</version>
+  <description>Automated evaluation package for Riemannian Motion Policy controller</description>
+  <maintainer email="mbodmer@ethz.ch">matteo</maintainer>
+  <license>Apache-2.0</license>
+
+  <!-- Dependencies for ROS2 -->
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>moveit_msgs</depend>
+  <depend>shape_msgs</depend>  <!-- Fix this line -->
+  <depend>std_msgs</depend>
+  
+  <!-- Dependencies for the robot and control -->
+  <depend>franka_description</depend>
+  <depend>franka_fr3_moveit_config</depend>
+  <depend>riemannian_motion_policy</depend>
+  <depend>motion_planning_mt</depend>
+  <depend>messages_fr3</depend> 
+
+  <!-- Launch and visualization -->
+  <depend>launch_ros</depend>
+  <depend>rviz2</depend>
+  <depend>ros_gz_sim</depend>
+  
+  <!-- Python dependencies -->
+  <exec_depend>python3-numpy</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
