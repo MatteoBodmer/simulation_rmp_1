@@ -26,6 +26,8 @@ setup(
     entry_points={
         'console_scripts': [
             'evaluation_manager_rmp = simulation_rmp.evaluation_manager_rmp:main',
+            'master_evaluation_manager = simulation_rmp.master_evaluation_manager:main',
+            'single_evaluation_manager = simulation_rmp.single_evaluation_manager:main',
         ],
     },
 )

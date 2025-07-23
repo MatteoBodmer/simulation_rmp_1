@@ -14,6 +14,8 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, Command, FindExecutable
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+from launch.actions import RegisterEventHandler, Shutdown
+from launch.event_handlers import OnProcessExit
 
 
 def load_yaml(package_name, file_path):
@@ -238,6 +240,15 @@ def generate_launch_description():
         output='screen',
     )
 
+
+
+    shutdown_on_exit = RegisterEventHandler(
+        OnProcessExit(
+            target_action=evaluation_manager,
+            on_exit=[Shutdown()]
+        )
+    )
+
     # === Scene Node (for populating environment) ===
     # scene_node = Node(
     #     package='motion_planning_mt',  # Adjust if package name is different  
@@ -317,20 +328,15 @@ def generate_launch_description():
 
             # Start evaluation_manager after delay
         TimerAction(
-            period=15.0,
-            actions=[
-                Node(
-                    package='simulation_rmp',
-                    executable='evaluation_manager_rmp',
-                    name='evaluation_manager',
-                    output='screen',
-            )
-        ]
-    ),
-])
+            period=10.0,
+            actions=[evaluation_manager]
+        ),
+        shutdown_on_exit
+    ])
         
 
+
+
+
+
         
-  
-        
- 
