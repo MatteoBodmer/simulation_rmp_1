@@ -2,7 +2,7 @@
 
 # Exit immediately if a command exits with a non-zero status.
 
-NUM_SIMULATIONS=5
+NUM_SIMULATIONS=2
 PACKAGE_NAME="simulation_rmp"
 LAUNCH_FILE="simulation_rmp_launch.py"
 
@@ -20,7 +20,6 @@ do
 done
 
 batch
-
 
 
 

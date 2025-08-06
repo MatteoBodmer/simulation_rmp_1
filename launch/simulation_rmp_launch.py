@@ -114,6 +114,12 @@ def generate_launch_description():
         output='screen'
     )
 
+    # Add this after the riemannian_motion_policy controller loading
+    # franka_robot_state_broadcaster = ExecuteProcess(
+    #     cmd=['ros2', 'control', 'load_controller', '--set-state', 'active', 'franka_robot_state_broadcaster'],
+    #     output='screen'
+    # )
+
     riemannian_motion_policy = ExecuteProcess(
         cmd=['ros2', 'control', 'load_controller', '--set-state', 'active', 'riemannian_motion_policy'],
         output='screen'
@@ -304,6 +310,20 @@ def generate_launch_description():
                 on_exit=[riemannian_motion_policy],
             )
         ),
+
+        # RegisterEventHandler(
+        #     OnProcessExit(
+        #         target_action=load_joint_state_broadcaster,
+        #         on_exit=[franka_robot_state_broadcaster],  # Add this line
+        #     )
+        # ),
+        # RegisterEventHandler(
+        #     OnProcessExit(
+        #         target_action=franka_robot_state_broadcaster,  # And update this
+        #         on_exit=[riemannian_motion_policy],
+        #     )
+        # ),
+
         set_load,
         RegisterEventHandler(
             OnProcessExit(
@@ -334,6 +354,7 @@ def generate_launch_description():
         shutdown_on_exit
     ])
         
+
 
 
 
