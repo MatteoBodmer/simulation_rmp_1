@@ -10,6 +10,8 @@ import json
 import numpy as np
 from datetime import datetime
 from messages_fr3.msg import ClosestPoint  # Import your custom message type
+from geometry_msgs.msg import PoseStamped
+
 
 class EvaluationManager(Node):
     def __init__(self):
@@ -25,6 +27,15 @@ class EvaluationManager(Node):
             10
         )
         
+        # Subscribe to end-effector pose from distance calculator
+        self.ee_pose_sub = self.create_subscription(
+            PoseStamped,
+            '/end_effector_pose',
+            self.ee_pose_callback,
+            10
+        )
+        self.current_ee_pose = None
+        
         self.workspace_bounds = {'x': (0.2, 0.8), 'y': (-0.5, 0.5), 'z': (0.2, 0.8)}
         
         # Storage for distance data during simulation
@@ -37,6 +48,18 @@ class EvaluationManager(Node):
         result = self.run_single_simulation()
         self.save_results(result)
         self.get_logger().info("Simulation complete.")
+
+    def ee_pose_callback(self, msg):
+        """Store the latest end-effector pose from distance calculator"""
+        self.current_ee_pose = msg
+
+    def get_end_effector_position(self):
+        """Get end-effector position from distance calculator"""
+        if self.current_ee_pose is not None:
+            pos = self.current_ee_pose.pose.position
+            return np.array([pos.x, pos.y, pos.z])
+        else:
+            return None
 
     def distance_callback(self, msg):
         """Callback to log distance data during simulation"""
@@ -104,39 +127,162 @@ class EvaluationManager(Node):
                 self.get_logger().warn("Distance calculator not detected, continuing anyway...")
                 break
             time.sleep(0.5)
+        
+        # Wait for end-effector pose publisher
+        self.get_logger().info("Waiting for end-effector pose publisher...")
+        start_wait = time.time()
+        while not self.count_publishers('/end_effector_pose') > 0:
+            if time.time() - start_wait > timeout:
+                self.get_logger().warn("End-effector pose publisher not detected, continuing anyway...")
+                break
+            time.sleep(0.5)
             
         time.sleep(2.0)
         self.get_logger().info("Dependencies ready.")
 
+    def is_point_inside_cylinder(self, point, cylinder_pose, height=0.4, radius=0.12):
+        """Check if a point is inside the cylinder"""
+        # Vector from cylinder center to point
+        dx = point.position.x - cylinder_pose.position.x
+        dy = point.position.y - cylinder_pose.position.y
+        dz = point.position.z - cylinder_pose.position.z
+        
+        # Check if within cylinder height
+        if abs(dz) > height / 2:
+            return False
+        
+        # Check if within cylinder radius
+        radial_distance = np.sqrt(dx**2 + dy**2)
+        return radial_distance <= radius
+
+    def geometric_collision_check(self, obstacle_pose):
+        """Simplified geometric check - assumes robot base is at origin"""
+        # Robot base position (fr3_link0)
+        robot_base = np.array([0.0, 0.0, 0.0])
+        
+        # Approximate robot arm reach (simplified)
+        max_reach = 0.8  # meters
+        min_safe_distance = 0.3  # minimum safe distance from base
+        
+        obstacle_pos = np.array([obstacle_pose.position.x, obstacle_pose.position.y, obstacle_pose.position.z])
+        distance_from_base = np.linalg.norm(obstacle_pos - robot_base)
+        
+        # Obstacle should be within reach but not too close to base
+        return min_safe_distance < distance_from_base < max_reach
+
     def generate_random_obstacle_pose(self):
+        """Generate obstacle pose ensuring it doesn't collide with robot"""
+        for _ in range(100):  # Increased attempts
+            pose = Pose()
+            pose.position.x = random.uniform(*self.workspace_bounds['x'])
+            pose.position.y = random.uniform(*self.workspace_bounds['y'])
+            pose.position.z = random.uniform(*self.workspace_bounds['z'])
+            pose.orientation.w = 1.0
+            
+            if self.geometric_collision_check(pose):
+                return pose
+        
+        # Fallback to a known safe position
+        self.get_logger().warn("Could not find safe obstacle pose, using fallback")
         pose = Pose()
-        pose.position.x = random.uniform(*self.workspace_bounds['x'])
-        pose.position.y = random.uniform(*self.workspace_bounds['y'])
-        pose.position.z = random.uniform(*self.workspace_bounds['z'])
+        pose.position.x = 0.5
+        pose.position.y = 0.3
+        pose.position.z = 0.4
         pose.orientation.w = 1.0
         return pose
 
     def generate_random_target_pose(self, obstacle_pose):
-        min_distance = 0.15
-        for _ in range(50):
+        """Generate target pose ensuring it's not inside the obstacle"""
+        min_clearance = 0.15  # 15cm clearance from obstacle surface
+        cylinder_height = 0.4
+        cylinder_radius = 0.12
+        
+        for _ in range(100):  # Increased attempts
             target = Pose()
             target.position.x = random.uniform(*self.workspace_bounds['x'])
             target.position.y = random.uniform(*self.workspace_bounds['y'])
             target.position.z = random.uniform(*self.workspace_bounds['z'])
             target.orientation.w = 1.0
-            dist = np.linalg.norm([
-                target.position.x - obstacle_pose.position.x,
-                target.position.y - obstacle_pose.position.y,
-                target.position.z - obstacle_pose.position.z
-            ])
-            if dist > min_distance:
+            
+            # Check if target is inside cylinder
+            if self.is_point_inside_cylinder(target, obstacle_pose, cylinder_height, cylinder_radius):
+                continue
+            
+            # Calculate minimum distance to cylinder surface (not just center)
+            dx = target.position.x - obstacle_pose.position.x
+            dy = target.position.y - obstacle_pose.position.y
+            dz = target.position.z - obstacle_pose.position.z
+            
+            # Distance to curved surface
+            radial_distance = np.sqrt(dx**2 + dy**2)
+            distance_to_curved_surface = abs(radial_distance - cylinder_radius)
+            
+            # Distance to top/bottom caps
+            distance_to_caps = abs(abs(dz) - cylinder_height/2)
+            
+            # Use minimum distance to any surface
+            min_surface_distance = min(distance_to_curved_surface, distance_to_caps)
+            
+            if min_surface_distance > min_clearance:
                 return target
+        
+        # Fallback to a known safe position
+        self.get_logger().warn("Could not find safe target pose, using fallback")
         target = Pose()
         target.position.x = 0.3
         target.position.y = 0.0
         target.position.z = 0.6
         target.orientation.w = 1.0
         return target
+
+    def wait_and_check_initial_collision(self):
+        """Wait for distance data and check if robot starts in collision"""
+        self.get_logger().info("Checking initial robot safety...")
+        
+        # Subscribe temporarily to distance data
+        initial_distances = None
+        
+        def temp_callback(msg):
+            nonlocal initial_distances
+            initial_distances = msg
+        
+        temp_sub = self.create_subscription(ClosestPoint, '/closest_point', temp_callback, 10)
+        
+        # Wait for distance data
+        timeout = 5.0
+        start_time = time.time()
+        while initial_distances is None and (time.time() - start_time) < timeout:
+            rclpy.spin_once(self, timeout_sec=0.1)
+        
+        self.destroy_subscription(temp_sub)
+        
+        if initial_distances is None:
+            self.get_logger().warn("Could not get initial distance data")
+            return False
+        
+        # Check if any link is too close to obstacles
+        min_safe_distance = 0.1  # 10cm minimum
+        
+        links_data = {
+            'link2': {'x': initial_distances.frame2x, 'y': initial_distances.frame2y, 'z': initial_distances.frame2z},
+            'link3': {'x': initial_distances.frame3x, 'y': initial_distances.frame3y, 'z': initial_distances.frame3z},
+            'link4': {'x': initial_distances.frame4x, 'y': initial_distances.frame4y, 'z': initial_distances.frame4z},
+            'link5': {'x': initial_distances.frame5x, 'y': initial_distances.frame5y, 'z': initial_distances.frame5z},
+            'link6': {'x': initial_distances.frame6x, 'y': initial_distances.frame6y, 'z': initial_distances.frame6z},
+            'link7': {'x': initial_distances.frame7x, 'y': initial_distances.frame7y, 'z': initial_distances.frame7z},
+            'hand': {'x': initial_distances.framehandx, 'y': initial_distances.framehandy, 'z': initial_distances.framehandz},
+            'end_effector': {'x': initial_distances.frameeex, 'y': initial_distances.frameeey, 'z': initial_distances.frameeez}
+        }
+        
+        for link_name, coords in links_data.items():
+            if len(coords['x']) > 0:
+                for i in range(len(coords['x'])):
+                    distance = np.sqrt(coords['x'][i]**2 + coords['y'][i]**2 + coords['z'][i]**2)
+                    if distance < min_safe_distance:
+                        self.get_logger().warn(f"Initial collision risk: {link_name} too close ({distance:.3f}m)")
+                        return False
+        
+        return True
 
     def spawn_obstacle(self, pose):
         self.clear_obstacles()
@@ -188,26 +334,72 @@ class EvaluationManager(Node):
         self.get_logger().info(f"Stopped recording. Collected {len(self.distance_data)} distance measurements")
 
     def run_single_simulation(self):
-        # Setup simulation
-        obstacle = self.generate_random_obstacle_pose()
-        self.spawn_obstacle(obstacle)
+        # Generate obstacle and target with safety checks
+        max_attempts = 10
+        for attempt in range(max_attempts):
+            obstacle = self.generate_random_obstacle_pose()
+            self.spawn_obstacle(obstacle)
+            time.sleep(1.0)  # Allow time for obstacle to be added to scene
+            
+            # Check if robot is safe
+            if self.wait_and_check_initial_collision():
+                self.get_logger().info(f"Safe obstacle spawn achieved on attempt {attempt+1}")
+                break
+            else:
+                self.get_logger().warn(f"Attempt {attempt+1}: Unsafe spawn, retrying...")
+                self.clear_obstacles()
+                time.sleep(1.0)
+        else:
+            self.get_logger().warn("Could not find safe obstacle spawn after maximum attempts")
+        
         target = self.generate_random_target_pose(obstacle)
         time.sleep(2.0)
         
         # Start distance recording
         self.start_recording()
         
+        # Goal tracking variables
+        self.target_position = np.array([target.position.x, target.position.y, target.position.z])
+        self.goal_tolerance = 0.05  # 5 cm tolerance
+        self.goal_reached = False
+        self.goal_reach_time = None
+        self.position_check_count = 0
+        self.successful_position_checks = 0
+        
         # Set target and execute
         self.set_target_pose(target)
+        self.get_logger().info(f"Target position: [{target.position.x:.3f}, {target.position.y:.3f}, {target.position.z:.3f}]")
         self.get_logger().info("Waiting briefly for robot state updates...")
         time.sleep(1.0)
         exec_time = 10.0
         self.get_logger().info(f"Monitoring for {exec_time} seconds.")
         
-        # Keep spinning to receive distance messages
+        # Keep spinning to receive distance messages and check goal
         end_time = time.time() + exec_time
         while time.time() < end_time and rclpy.ok():
             rclpy.spin_once(self, timeout_sec=0.1)
+            
+            # Check if goal is reached
+            if not self.goal_reached:
+                self.position_check_count += 1
+                current_pos = self.get_end_effector_position()
+                if current_pos is not None:
+                    self.successful_position_checks += 1
+                    dist = np.linalg.norm(current_pos - self.target_position)
+                    
+                    # Log position every 50 checks for debugging
+                    if self.position_check_count % 50 == 0:
+                        self.get_logger().info(f"Current pos: [{current_pos[0]:.3f}, {current_pos[1]:.3f}, {current_pos[2]:.3f}], distance to goal: {dist:.3f}m")
+                    
+                    if dist <= self.goal_tolerance:
+                        self.goal_reached = True
+                        self.goal_reach_time = time.time() - self.simulation_start_time
+                        self.get_logger().info(f"🎯 Goal reached at t={self.goal_reach_time:.2f}s (distance {dist:.3f}m)")
+        
+        # Debug info
+        self.get_logger().info(f"Position checks: {self.position_check_count}, successful: {self.successful_position_checks}")
+        if self.successful_position_checks == 0:
+            self.get_logger().warn("No successful position checks - end-effector pose not available!")
         
         # Stop recording
         self.stop_recording()
@@ -221,7 +413,15 @@ class EvaluationManager(Node):
             'execution_time': exec_time,
             'timestamp': datetime.now().isoformat(),
             'distance_analysis': analysis,
-            'raw_distance_data': self.distance_data[:100]  # Limit raw data to first 100 points
+            'raw_distance_data': self.distance_data[:100],  # Limit raw data to first 100 points
+            # New goal tracking results
+            'goal_reached': self.goal_reached,
+            'goal_reach_time': self.goal_reach_time,
+            'goal_tolerance': self.goal_tolerance,
+            'position_check_count': self.position_check_count,
+            'successful_position_checks': self.successful_position_checks,
+            # Safety information
+            'safe_spawn_attempts': attempt + 1 if 'attempt' in locals() else 1
         }
         return result
 
@@ -269,7 +469,19 @@ class EvaluationManager(Node):
             json.dump({'result': result}, f, indent=2)
         self.get_logger().info(f"Results saved to {filename}")
         
-        # Print summary
+        # Print summary including goal achievement
+        self.get_logger().info(f"Goal Achievement Summary:")
+        self.get_logger().info(f"  Goal reached: {result.get('goal_reached', False)}")
+        if result.get('goal_reach_time') is not None:
+            self.get_logger().info(f"  Time to reach goal: {result['goal_reach_time']:.2f}s")
+        self.get_logger().info(f"  Goal tolerance: {result.get('goal_tolerance', 'N/A')}m")
+        self.get_logger().info(f"  Position checks: {result.get('successful_position_checks', 0)}/{result.get('position_check_count', 0)}")
+        
+        # Print safety summary
+        self.get_logger().info(f"Safety Summary:")
+        self.get_logger().info(f"  Safe spawn attempts: {result.get('safe_spawn_attempts', 'N/A')}")
+        
+        # Print distance summary
         if 'distance_analysis' in result:
             analysis = result['distance_analysis']
             if 'min_distance_achieved' in analysis:
