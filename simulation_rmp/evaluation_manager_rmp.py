@@ -19,6 +19,21 @@ class EvaluationManager(Node):
         self.pose_pub = self.create_publisher(Pose, '/riemannian_motion_policy/reference_pose', 10)
         self.planning_scene_pub = self.create_publisher(PlanningScene, '/planning_scene', 10)
         
+        # Use run directory from environment variable if available, otherwise create new one
+        if 'RUN_DIR' in os.environ and os.path.exists(os.environ['RUN_DIR']):
+            self.run_dir = os.environ['RUN_DIR']
+            self.get_logger().info(f"Using existing run directory from environment: {self.run_dir}")
+        else:
+            # Fallback: create timestamped run directory if no environment variable
+            self.run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.simulation_rmp_dir = "/home/matteo/Simulation_rmp"
+            self.run_dir = os.path.join(self.simulation_rmp_dir, f"Run_{self.run_timestamp}")
+            os.makedirs(self.run_dir, exist_ok=True)
+            self.get_logger().info(f"Created new run directory: {self.run_dir}")
+        
+        # JSON file path for this run
+        self.results_file = os.path.join(self.run_dir, "evaluation_results_with_distances.json")
+        
         # Subscribe to closest point distances
         self.distance_sub = self.create_subscription(
             ClosestPoint,
@@ -69,6 +84,9 @@ class EvaluationManager(Node):
         current_time = time.time()
         relative_time = current_time - self.simulation_start_time if self.simulation_start_time else 0
         
+        # Get current end-effector position for trajectory recording
+        current_ee_pos = self.get_end_effector_position()
+        
         # Calculate minimum distances for each link
         min_distances = {}
         
@@ -102,7 +120,9 @@ class EvaluationManager(Node):
             'timestamp': relative_time,
             'overall_min_distance': overall_min,
             'link_distances': min_distances,
-            'num_obstacles_detected': len(msg.frame2x)  # Assuming all links detect same obstacles
+            'num_obstacles_detected': len(msg.frame2x),  # Assuming all links detect same obstacles
+            # CRITICAL ADDITION: Store end-effector position for trajectory plotting
+            'end_effector_position': current_ee_pos.tolist() if current_ee_pos is not None else None
         }
         
         self.distance_data.append(distance_entry)
@@ -360,7 +380,7 @@ class EvaluationManager(Node):
         
         # Goal tracking variables
         self.target_position = np.array([target.position.x, target.position.y, target.position.z])
-        self.goal_tolerance = 0.05  # 5 cm tolerance
+        self.goal_tolerance = 0.02  # 2 cm tolerance
         self.goal_reached = False
         self.goal_reach_time = None
         self.position_check_count = 0
@@ -394,7 +414,7 @@ class EvaluationManager(Node):
                     if dist <= self.goal_tolerance:
                         self.goal_reached = True
                         self.goal_reach_time = time.time() - self.simulation_start_time
-                        self.get_logger().info(f"🎯 Goal reached at t={self.goal_reach_time:.2f}s (distance {dist:.3f}m)")
+                        self.get_logger().info(f"Goal reached at t={self.goal_reach_time:.2f}s (distance {dist:.3f}m)")
         
         # Debug info
         self.get_logger().info(f"Position checks: {self.position_check_count}, successful: {self.successful_position_checks}")
@@ -463,14 +483,32 @@ class EvaluationManager(Node):
         return analysis
 
     def save_results(self, result):
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"/home/matteo/evaluation_results_with_distances_{timestamp}.json"
-        with open(filename, 'w') as f:
-            json.dump({'result': result}, f, indent=2)
-        self.get_logger().info(f"Results saved to {filename}")
+        # Load existing data if file exists
+        existing_data = {}
+        if os.path.exists(self.results_file):
+            try:
+                with open(self.results_file, 'r') as f:
+                    existing_data = json.load(f)
+                self.get_logger().info(f"Loaded existing data with {len(existing_data)} simulations")
+            except (json.JSONDecodeError, FileNotFoundError) as e:
+                self.get_logger().warn(f"Could not load existing data: {e}, starting fresh")
+                existing_data = {}
+        
+        # Find the next simulation number
+        simulation_numbers = [int(k.replace('simulation_', '')) for k in existing_data.keys() if k.startswith('simulation_')]
+        next_sim_num = max(simulation_numbers) + 1 if simulation_numbers else 1
+        
+        # Add new result with simulation number as key
+        existing_data[f'simulation_{next_sim_num}'] = result
+        
+        # Save updated data
+        with open(self.results_file, 'w') as f:
+            json.dump(existing_data, f, indent=2)
+        
+        self.get_logger().info(f"Results saved to {self.results_file} as simulation_{next_sim_num}")
         
         # Print summary including goal achievement
-        self.get_logger().info(f"Goal Achievement Summary:")
+        self.get_logger().info(f"Simulation {next_sim_num} - Goal Achievement Summary:")
         self.get_logger().info(f"  Goal reached: {result.get('goal_reached', False)}")
         if result.get('goal_reach_time') is not None:
             self.get_logger().info(f"  Time to reach goal: {result['goal_reach_time']:.2f}s")
