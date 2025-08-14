@@ -1,12 +1,12 @@
 #!/bin/bash
 
 # Exit immediately if a command exits with a non-zero status.
-#exec franka_ros2_ws/src/simulation_rmp/simulation_rmp/run_suite.sh
+#exec franka_ros2_ws/src/simulation_rmp_1/simulation_rmp_1/run_suite.sh
 
 set -e
 
-NUM_SIMULATIONS=4
-PACKAGE_NAME="simulation_rmp"
+NUM_SIMULATIONS=1
+PACKAGE_NAME="simulation_rmp_1"
 LAUNCH_FILE="simulation_rmp_launch.py"
 
 # Create a timestamp for the run folder to group all simulations in the same folder

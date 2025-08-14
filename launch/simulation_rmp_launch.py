@@ -240,7 +240,7 @@ def generate_launch_description():
 
     # Evaluation Manager Node
     evaluation_manager = Node(
-        package='simulation_rmp',  # Adjust package name if different
+        package='simulation_rmp_1',  # Adjust package name if different
         executable='evaluation_manager_rmp',
         name='evaluation_manager',
         output='screen',

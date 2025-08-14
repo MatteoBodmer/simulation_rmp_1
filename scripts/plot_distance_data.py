@@ -5,7 +5,7 @@ Distance Data Plotting Script for RMP Evaluation
 This script loads JSON results from the evaluation manager and creates
 interactive plots showing distance from each robot link to obstacles over time.
 
-Command: python3 /home/matteo/franka_ros2_ws/src/simulation_rmp/scripts/plot_distance_data.py
+Command: python3 /home/matteo/franka_ros2_ws/src/simulation_rmp_1/scripts/plot_distance_data.py
 
 CONFIGURATION - Edit these variables at the top:
 """
@@ -13,7 +13,7 @@ CONFIGURATION - Edit these variables at the top:
 # ==================== MANUAL CONFIGURATION ====================
 # Edit these variables to specify which data to plot:
 
-RUN_FOLDER_NAME = "Run_20250808_150110"  # Name of the run folder (e.g., "Run_20250808_143022")
+RUN_FOLDER_NAME = "Run_20250814_145854"  # Name of the run folder (e.g., "Run_20250808_143022")
 JSON_FILENAME = "evaluation_results_with_distances.json"  # Name of the JSON file
 
 # Specify which simulations to plot:
@@ -64,7 +64,8 @@ def list_available_simulations(json_filename):
         sim_data = data[sim]
         timestamp = sim_data.get('timestamp', 'Unknown time')
         goal_reached = sim_data.get('goal_reached', 'Unknown')
-        print(f"  {sim}: {timestamp} - Goal reached: {goal_reached}")
+        num_obstacles = sim_data.get('num_obstacles', 'Unknown')
+        print(f"  {sim}: {timestamp} - Goal reached: {goal_reached} - Obstacles: {num_obstacles}")
     
     return simulations
 
@@ -89,7 +90,16 @@ def plot_single_simulation(data, simulation_key, save_dir=None, json_filename=No
         print(f"No raw distance data available for {simulation_key}")
         return None
     
+    # Get obstacle information for this simulation
+    num_obstacles = result.get('num_obstacles', 'Unknown')
+    obstacle_positions = result.get('obstacle_positions', [])
+    
     print(f"Plotting {simulation_key} with {len(result['raw_distance_data'])} distance measurements")
+    print(f"  Number of obstacles in this simulation: {num_obstacles}")
+    if obstacle_positions:
+        print(f"  Obstacle positions:")
+        for i, pos in enumerate(obstacle_positions):
+            print(f"    Obstacle {i+1}: [{pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}]")
     
     # Extract data for plotting
     timestamps = []
@@ -149,13 +159,16 @@ def plot_single_simulation(data, simulation_key, save_dir=None, json_filename=No
     
     print(f"Plotting data for {links_with_data} links in {simulation_key}")
     
-    # Create title with simulation info
+    # Create title with simulation info including obstacle count
     sim_number = simulation_key.split('_')[1]
-    title_text = f'Robot Link Distances to Obstacle Over Time - Simulation {sim_number}'
+    title_text = f'Robot Link Distances to Obstacles Over Time - Simulation {sim_number}'
     subtitle_parts = []
     
     # Add run folder info to subtitle
     subtitle_parts.append(f'Run: {RUN_FOLDER_NAME}')
+    
+    # Add obstacle information
+    subtitle_parts.append(f'Obstacles: {num_obstacles}')
     
     if 'target_position' in result:
         target_pos = result['target_position']
@@ -166,6 +179,10 @@ def plot_single_simulation(data, simulation_key, save_dir=None, json_filename=No
     
     if 'goal_reach_time' in result and result['goal_reach_time'] is not None:
         subtitle_parts.append(f'Time: {result["goal_reach_time"]:.2f}s')
+    
+    # Add direct sampling info if available
+    if result.get('direct_sampling_used'):
+        subtitle_parts.append('Direct Sampling')
     
     if 'timestamp' in result:
         subtitle_parts.append(f'Date: {result["timestamp"][:19]}')
@@ -183,7 +200,7 @@ def plot_single_simulation(data, simulation_key, save_dir=None, json_filename=No
             yanchor='top'
         ),
         xaxis_title='Time (seconds)',
-        yaxis_title='Distance to Obstacle (meters)',
+        yaxis_title='Distance to Obstacles (meters)',
         legend=dict(
             yanchor="top",
             y=0.99,
@@ -221,6 +238,25 @@ def plot_single_simulation(data, simulation_key, save_dir=None, json_filename=No
                           yshift=0  # Move annotation down to avoid collision with subtitle
                       ))
     
+    # Add obstacle position annotations if available
+    if obstacle_positions:
+        # Add text box with obstacle positions
+        obstacle_text = f"Obstacle Positions ({num_obstacles} total):<br>"
+        for i, pos in enumerate(obstacle_positions):
+            obstacle_text += f"#{i+1}: [{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}]<br>"
+        
+        fig.add_annotation(
+            xref="paper", yref="paper",
+            x=0.02, y=0.98,  # Top-left corner
+            text=obstacle_text,
+            showarrow=False,
+            font=dict(size=10, color="black"),
+            bgcolor="rgba(255, 255, 255, 0.8)",
+            bordercolor="gray",
+            borderwidth=1,
+            align="left"
+        )
+    
     # Determine save directory - use same directory as JSON file if not specified
     if save_dir is None:
         save_dir = os.path.dirname(os.path.abspath(json_filename)) if json_filename else os.getcwd()
@@ -229,9 +265,9 @@ def plot_single_simulation(data, simulation_key, save_dir=None, json_filename=No
     # Ensure save directory exists
     os.makedirs(save_dir, exist_ok=True)
     
-    # Create timestamped filenames
+    # Create timestamped filenames with obstacle count
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_name = f"distance_plot_{simulation_key}_{timestamp}"
+    base_name = f"distance_plot_{simulation_key}_{num_obstacles}obs_{timestamp}"
     
     # Save as HTML (always works)
     html_filename = os.path.join(save_dir, f"{base_name}.html")
@@ -247,10 +283,16 @@ def plot_single_simulation(data, simulation_key, save_dir=None, json_filename=No
         print(f"Could not save PNG image: {e}")
         print("   Install kaleido for image export: pip install kaleido")
     
-    # Print summary statistics
+    # Print summary statistics including obstacle information
     print(f"\nPlot Summary for {simulation_key}:")
     print(f"   Time range: {min(timestamps):.2f}s to {max(timestamps):.2f}s")
     print(f"   Links with data: {links_with_data}/8")
+    print(f"   Number of obstacles: {num_obstacles}")
+    
+    if obstacle_positions:
+        print(f"   Obstacle positions:")
+        for i, pos in enumerate(obstacle_positions):
+            print(f"     Obstacle {i+1}: [{pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}]")
     
     if 'distance_analysis' in result:
         analysis = result['distance_analysis']
@@ -304,6 +346,18 @@ def plot_distance_data_from_file(json_filename, simulation_numbers=None, save_di
     
     print(f"Found {len(available_sims)} simulations: {', '.join(available_sims)}")
     
+    # Show obstacle count distribution
+    obstacle_counts = {}
+    for sim_key in available_sims:
+        num_obs = data[sim_key].get('num_obstacles', 'Unknown')
+        if num_obs != 'Unknown':
+            obstacle_counts[num_obs] = obstacle_counts.get(num_obs, 0) + 1
+    
+    if obstacle_counts:
+        print("Obstacle count distribution:")
+        for count, freq in sorted(obstacle_counts.items()):
+            print(f"  {count} obstacles: {freq} simulation(s)")
+    
     # Determine which simulations to plot
     if simulation_numbers is None:
         # Plot all simulations
@@ -351,7 +405,7 @@ def main():
     
     # Print configuration
     print("=" * 60)
-    print("DISTANCE DATA PLOTTING TOOL")
+    print("DISTANCE DATA PLOTTING TOOL - MULTI-OBSTACLE VERSION")
     print("=" * 60)
     print(f"📁 Base directory: {BASE_SIMULATION_DIR}")
     print(f"📂 Run folder: {RUN_FOLDER_NAME}")
@@ -409,7 +463,7 @@ def main():
 
 def show_usage():
     """Show usage information"""
-    print("Distance Data Plotting Script - Manual Configuration Mode")
+    print("Distance Data Plotting Script - Multi-Obstacle Version")
     print("=" * 60)
     print("To use this script:")
     print("1. Edit the configuration variables at the top of this file:")
@@ -424,6 +478,8 @@ def show_usage():
     print("3. Optional command line arguments:")
     print("   python3 plot_distance_data.py --list    # List available simulations")
     print("   python3 plot_distance_data.py --help    # Show this help")
+    print()
+    print("This version accounts for varying numbers of obstacles per simulation.")
     print("=" * 60)
 
 if __name__ == "__main__":

@@ -14,8 +14,6 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, Command, FindExecutable
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
-from launch.actions import RegisterEventHandler, Shutdown
-from launch.event_handlers import OnProcessExit
 
 
 def load_yaml(package_name, file_path):
@@ -88,7 +86,7 @@ def generate_launch_description():
     os.environ['GZ_SIM_RESOURCE_PATH'] = os.path.dirname(get_package_share_directory('franka_description'))
     pkg_ros_gz_sim = get_package_share_directory('ros_gz_sim')
 
-    # Run Gazebo with GUI for manual simulation
+    # Run Gazebo with GUI for manual simulation observation
     gazebo_world = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(pkg_ros_gz_sim, 'launch', 'gz_sim.launch.py')),
@@ -215,7 +213,7 @@ def generate_launch_description():
         ],
     )
 
-    # Distance Calculator Node (for safety monitoring)
+    # Distance Calculator Node (required for end-effector pose and safety monitoring)
     distance_calculator = Node(
         package='motion_planning_mt',
         executable='distance_calculator',
@@ -226,20 +224,12 @@ def generate_launch_description():
         }]
     )
 
-    # Manual Evaluation Manager Node (with delay to ensure everything is ready)
-    manual_evaluation_manager = Node(
-        package='simulation_rmp',
+    # Single Simulation Evaluation Manager Node (starts the recreation)
+    single_simulation_manager = Node(
+        package='simulation_rmp_1',
         executable='single_simulation_evaluation_manager_rmp',
         name='single_simulation_evaluation_manager_rmp',
         output='screen',
-    )
-
-    # Shutdown when manual evaluation manager exits
-    shutdown_on_exit = RegisterEventHandler(
-        OnProcessExit(
-            target_action=manual_evaluation_manager,
-            on_exit=[Shutdown()]
-        )
     )
 
     # === Final LaunchDescription ===
@@ -252,6 +242,7 @@ def generate_launch_description():
         robot_state_publisher,
         spawn_robot,
 
+        # Sequential startup chain
         RegisterEventHandler(
             OnProcessExit(
                 target_action=spawn_robot,
@@ -273,15 +264,14 @@ def generate_launch_description():
             )
         ),
 
-        # MoveIt
+        # MoveIt components
         run_move_group_node,
         rviz_node,
         distance_calculator,
 
-        # Start manual evaluation manager after delay
+        # Start the single simulation manager with delay to ensure everything is ready
         TimerAction(
-            period=10.0,  # Wait a bit longer for manual setup
-            actions=[manual_evaluation_manager]
+            period=10.0,  # Wait 10 seconds for all services to be ready
+            actions=[single_simulation_manager]
         ),
-        shutdown_on_exit
     ])

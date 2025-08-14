@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-3D Trajectory Plotting Script for RMP Evaluation
+3D Trajectory Plotting Script for RMP Evaluation - Multi-Obstacle Version with Exact Geometry
 
 This script creates 3D visualizations showing:
 - End-effector trajectory during simulation (reconstructed from actual data)
-- Obstacle cylinder position (automatically extracted from evaluation data)
+- Multiple obstacle cylinder positions with EXACT sizes and orientations from simulation
 - Target position (automatically extracted from evaluation data)
 - Start position (automatically extracted from evaluation data)
 
-Command: python3 /home/matteo/franka_ros2_ws/src/simulation_rmp/scripts/3D_trajectory.py
+Command: python3 /home/matteo/franka_ros2_ws/src/simulation_rmp_1/scripts/3D_trajectory.py
 
 CONFIGURATION - Edit these variables at the top:
 """
@@ -16,7 +16,7 @@ CONFIGURATION - Edit these variables at the top:
 # ==================== MANUAL CONFIGURATION ====================
 # Edit these variables to specify which data to plot:
 
-RUN_FOLDER_NAME = "Run_20250808_150110"  # Name of the run folder
+RUN_FOLDER_NAME = "Run_20250814_145854"  # Name of the run folder
 JSON_FILENAME = "evaluation_results_with_distances.json"  # Name of the JSON file
 
 # Specify which simulations to plot:
@@ -67,67 +67,107 @@ def list_available_simulations(json_filename):
         sim_data = data[sim]
         timestamp = sim_data.get('timestamp', 'Unknown time')
         goal_reached = sim_data.get('goal_reached', 'Unknown')
-        print(f"  {sim}: {timestamp} - Goal reached: {goal_reached}")
+        num_obstacles = sim_data.get('num_obstacles', 'Unknown')
+        print(f"  {sim}: {timestamp} - Goal reached: {goal_reached} - Obstacles: {num_obstacles}")
     
     return simulations
 
-def extract_cylinder_dimensions_from_evaluation_manager():
-    """
-    Extract cylinder dimensions from the evaluation manager source code.
-    This reads the actual values used in the evaluation manager.
-    """
-    # Default values (matching evaluation_manager_rmp.py)
-    default_height = 0.4  # meters
-    default_radius = 0.12  # meters
-    
-    try:
-        # Try to read from the evaluation manager source file
-        evaluation_manager_path = "/home/matteo/franka_ros2_ws/src/simulation_rmp/simulation_rmp/evaluation_manager_rmp.py"
-        
-        if os.path.exists(evaluation_manager_path):
-            with open(evaluation_manager_path, 'r') as f:
-                content = f.read()
-                
-                # Look for cylinder dimensions in the spawn_obstacle method
-                # cylinder.dimensions = [height, radius]
-                import re
-                
-                # Search for cylinder.dimensions = [height, radius] pattern
-                dimensions_match = re.search(r'cylinder\.dimensions\s*=\s*\[([0-9.]+),\s*([0-9.]+)\]', content)
-                if dimensions_match:
-                    height = float(dimensions_match.group(1))
-                    radius = float(dimensions_match.group(2))
-                    print(f"Extracted cylinder dimensions from evaluation manager: height={height}m, radius={radius}m")
-                    return height, radius
-                
-                # Alternative search patterns
-                height_match = re.search(r'cylinder_height\s*=\s*([0-9.]+)', content)
-                radius_match = re.search(r'cylinder_radius\s*=\s*([0-9.]+)', content)
-                
-                if height_match and radius_match:
-                    height = float(height_match.group(1))
-                    radius = float(radius_match.group(1))
-                    print(f"Extracted cylinder dimensions from variables: height={height}m, radius={radius}m")
-                    return height, radius
-    except Exception as e:
-        print(f"Could not extract dimensions from evaluation manager: {e}")
-    
-    print(f"Using default cylinder dimensions: height={default_height}m, radius={default_radius}m")
-    return default_height, default_radius
-
-def create_cylinder_mesh(center, radius, height, resolution=20):
-    """Create a cylinder mesh for 3D visualization"""
-    # Create cylinder surface
+def create_cylinder_mesh_with_orientation(center, radius, height, orientation_type, resolution=20):
+    """Create a cylinder mesh for 3D visualization with correct orientation"""
+    # Create basic vertical cylinder first
     theta = np.linspace(0, 2*np.pi, resolution)
-    z = np.linspace(-height/2, height/2, 10)
+    z_local = np.linspace(-height/2, height/2, 10)
     
-    # Cylinder side surface
-    theta_mesh, z_mesh = np.meshgrid(theta, z)
-    x_mesh = center[0] + radius * np.cos(theta_mesh)
-    y_mesh = center[1] + radius * np.sin(theta_mesh)
-    z_mesh = center[2] + z_mesh
+    # Create meshgrid for cylinder surface
+    theta_mesh, z_mesh = np.meshgrid(theta, z_local)
+    x_local = radius * np.cos(theta_mesh)
+    y_local = radius * np.sin(theta_mesh)
+    z_local_mesh = z_mesh
+    
+    # Apply orientation transformation
+    if orientation_type == 'vertical':
+        # No transformation needed - default vertical
+        x_mesh = center[0] + x_local
+        y_mesh = center[1] + y_local
+        z_mesh = center[2] + z_local_mesh
+        
+    elif orientation_type == 'horizontal_x':
+        # Cylinder lies along X axis (rotated 90° around Y axis)
+        # Transform: x->z, y->y, z->-x
+        x_mesh = center[0] + z_local_mesh  # z becomes new x (cylinder extends along x)
+        y_mesh = center[1] + y_local       # y stays same
+        z_mesh = center[2] - x_local       # x becomes new z (with sign flip)
+        
+    elif orientation_type == 'horizontal_y':
+        # Cylinder lies along Y axis (rotated 90° around X axis)
+        # Transform: x->x, y->z, z->y
+        x_mesh = center[0] + x_local       # x stays same
+        y_mesh = center[1] + z_local_mesh  # z becomes new y (cylinder extends along y)
+        z_mesh = center[2] + y_local       # y becomes new z
     
     return x_mesh, y_mesh, z_mesh
+
+def create_cylinder_caps_with_orientation(center, radius, height, orientation_type, resolution=20):
+    """Create cylinder end caps with correct orientation"""
+    # Create circular cap in local coordinates
+    theta = np.linspace(0, 2*np.pi, resolution)
+    r = np.linspace(0, radius, 10)
+    theta_cap, r_cap = np.meshgrid(theta, r)
+    
+    x_cap_local = r_cap * np.cos(theta_cap)
+    y_cap_local = r_cap * np.sin(theta_cap)
+    
+    caps = []
+    
+    if orientation_type == 'vertical':
+        # Top cap (z = center[2] + height/2)
+        x_top = center[0] + x_cap_local
+        y_top = center[1] + y_cap_local
+        z_top = np.full_like(x_top, center[2] + height/2)
+        
+        # Bottom cap (z = center[2] - height/2)
+        x_bottom = center[0] + x_cap_local
+        y_bottom = center[1] + y_cap_local
+        z_bottom = np.full_like(x_bottom, center[2] - height/2)
+        
+        caps = [
+            (x_top, y_top, z_top),
+            (x_bottom, y_bottom, z_bottom)
+        ]
+        
+    elif orientation_type == 'horizontal_x':
+        # Cylinder along X axis - caps at x = center[0] ± height/2
+        # Cap plane is in Y-Z plane
+        y_cap1 = center[1] + x_cap_local  # x_local becomes y
+        z_cap1 = center[2] + y_cap_local  # y_local becomes z
+        x_cap1 = np.full_like(y_cap1, center[0] + height/2)  # positive X cap
+        
+        y_cap2 = center[1] + x_cap_local
+        z_cap2 = center[2] + y_cap_local
+        x_cap2 = np.full_like(y_cap2, center[0] - height/2)  # negative X cap
+        
+        caps = [
+            (x_cap1, y_cap1, z_cap1),
+            (x_cap2, y_cap2, z_cap2)
+        ]
+        
+    elif orientation_type == 'horizontal_y':
+        # Cylinder along Y axis - caps at y = center[1] ± height/2
+        # Cap plane is in X-Z plane
+        x_cap1 = center[0] + x_cap_local  # x_local stays x
+        z_cap1 = center[2] + y_cap_local  # y_local becomes z
+        y_cap1 = np.full_like(x_cap1, center[1] + height/2)  # positive Y cap
+        
+        x_cap2 = center[0] + x_cap_local
+        z_cap2 = center[2] + y_cap_local
+        y_cap2 = np.full_like(x_cap2, center[1] - height/2)  # negative Y cap
+        
+        caps = [
+            (x_cap1, y_cap1, z_cap1),
+            (x_cap2, y_cap2, z_cap2)
+        ]
+    
+    return caps
 
 def extract_real_trajectory_from_distance_data(raw_distance_data):
     """
@@ -171,10 +211,9 @@ def create_placeholder_warning_message():
         'font': {'size': 10, 'color': 'black'}
     }
 
-
 def plot_3d_simulation(data, simulation_key, save_dir=None, json_filename=None):
     """
-    Create 3D trajectory plot for a single simulation using data from evaluation manager
+    Create 3D trajectory plot for a single simulation using EXACT geometry from evaluation manager
     
     Args:
         data (dict): Full JSON data
@@ -189,21 +228,39 @@ def plot_3d_simulation(data, simulation_key, save_dir=None, json_filename=None):
     
     result = data[simulation_key]
     
-    # Extract positions directly from evaluation manager data
-    obstacle_pos = result.get('obstacle_position')
+    # Extract obstacle data from evaluation manager
+    obstacle_positions = result.get('obstacle_positions', [])
+    obstacle_sizes = result.get('obstacle_sizes', [])  # NEW: Get actual sizes
     target_pos = result.get('target_position')
+    num_obstacles = result.get('num_obstacles', len(obstacle_positions))
     
-    if not obstacle_pos or not target_pos:
+    if not obstacle_positions or not target_pos:
         print(f"Error: Missing position data in {simulation_key}")
+        print(f"  Obstacle positions: {len(obstacle_positions) if obstacle_positions else 0}")
+        print(f"  Target position: {'Available' if target_pos else 'Missing'}")
         return None
     
-    # Extract cylinder dimensions from evaluation manager
-    cylinder_height, cylinder_radius = extract_cylinder_dimensions_from_evaluation_manager()
+    # Check if we have size data (new format with random sizes)
+    if not obstacle_sizes:
+        print(f"  Warning: No obstacle size data found - using default dimensions")
+        # Fallback to default sizes if data doesn't exist
+        default_height, default_radius = 0.4, 0.12
+        obstacle_sizes = [
+            {'height': default_height, 'radius': default_radius, 'orientation': 'vertical'}
+            for _ in range(num_obstacles)
+        ]
     
-    print(f"Creating 3D plot for {simulation_key}")
-    print(f"  Obstacle at: [{obstacle_pos[0]:.3f}, {obstacle_pos[1]:.3f}, {obstacle_pos[2]:.3f}]")
+    print(f"Creating 3D plot for {simulation_key} with EXACT geometry")
+    print(f"  Number of obstacles: {num_obstacles}")
+    
+    # Print detailed obstacle information
+    for i, (obs_pos, obs_size) in enumerate(zip(obstacle_positions, obstacle_sizes)):
+        print(f"  Obstacle {i+1}:")
+        print(f"    Position: [{obs_pos[0]:.3f}, {obs_pos[1]:.3f}, {obs_pos[2]:.3f}]")
+        print(f"    Size: height={obs_size['height']:.3f}m, radius={obs_size['radius']:.3f}m")
+        print(f"    Orientation: {obs_size['orientation']}")
+    
     print(f"  Target at: [{target_pos[0]:.3f}, {target_pos[1]:.3f}, {target_pos[2]:.3f}]")
-    print(f"  Cylinder: height={cylinder_height}m, radius={cylinder_radius}m")
     
     # Create the 3D plot
     fig = go.Figure()
@@ -232,7 +289,7 @@ def plot_3d_simulation(data, simulation_key, save_dir=None, json_filename=None):
             text=[f'{t:.2f}' for t in timestamps]
         ))
         
-        # Add start position marker (smaller and more elegant) - FIXED SYMBOL
+        # Add start position marker
         fig.add_trace(go.Scatter3d(
             x=[trajectory[0, 0]],
             y=[trajectory[0, 1]],
@@ -248,7 +305,7 @@ def plot_3d_simulation(data, simulation_key, save_dir=None, json_filename=None):
                          '<extra></extra>'
         ))
         
-        # Add final position marker (smaller and more elegant) - FIXED SYMBOL
+        # Add final position marker
         fig.add_trace(go.Scatter3d(
             x=[trajectory[-1, 0]],
             y=[trajectory[-1, 1]],
@@ -266,7 +323,7 @@ def plot_3d_simulation(data, simulation_key, save_dir=None, json_filename=None):
     else:
         print("  Warning: No real trajectory data available - showing positions only")
         
-        # Show approximate start position (typical Franka home) - FIXED SYMBOL
+        # Show approximate start position (typical Franka home)
         approx_start = [0.4, 0.0, 0.6]
         fig.add_trace(go.Scatter3d(
             x=[approx_start[0]],
@@ -283,14 +340,14 @@ def plot_3d_simulation(data, simulation_key, save_dir=None, json_filename=None):
                          '<extra></extra>'
         ))
     
-    # Add target position marker (smaller and more elegant) - FIXED SYMBOL
+    # Add target position marker
     fig.add_trace(go.Scatter3d(
         x=[target_pos[0]],
         y=[target_pos[1]],
         z=[target_pos[2]],
         mode='markers',
         name='Target Position',
-        marker=dict(size=8, color='red', symbol='circle',  # Changed from 'x-thin' to 'x'
+        marker=dict(size=8, color='red', symbol='circle',
                    line=dict(width=2, color='darkred')),
         hovertemplate='<b>Target Position</b><br>' +
                      'X: %{x:.3f}m<br>' +
@@ -299,67 +356,66 @@ def plot_3d_simulation(data, simulation_key, save_dir=None, json_filename=None):
                      '<extra></extra>'
     ))
     
-    # Create cylinder obstacle using extracted dimensions
-    x_cyl, y_cyl, z_cyl = create_cylinder_mesh(
-        obstacle_pos, cylinder_radius, cylinder_height
-    )
+    # UPDATED: Add multiple cylinder obstacles with EXACT geometry from evaluation manager
+    obstacle_colors = ['Reds', 'Oranges', 'YlOrRd', 'OrRd', 'Greys']
     
-    # Add cylinder surface
-    fig.add_trace(go.Surface(
-        x=x_cyl,
-        y=y_cyl,
-        z=z_cyl,
-        name='Obstacle Cylinder',
-        opacity=0.7,
-        colorscale='Reds',
-        showscale=False,
-        hovertemplate='<b>Obstacle Cylinder</b><br>' +
-                     'Center: [%.3f, %.3f, %.3f]<br>' % tuple(obstacle_pos) +
-                     'Radius: %.3fm<br>' % cylinder_radius +
-                     'Height: %.3fm<br>' % cylinder_height +
-                     '<extra></extra>'
-    ))
+    for i, (obstacle_pos, obstacle_size) in enumerate(zip(obstacle_positions, obstacle_sizes)):
+        # Get exact dimensions and orientation from evaluation manager
+        height = obstacle_size['height']
+        radius = obstacle_size['radius']
+        orientation = obstacle_size['orientation']
+        
+        # Create cylinder obstacle using EXACT dimensions and orientation
+        x_cyl, y_cyl, z_cyl = create_cylinder_mesh_with_orientation(
+            obstacle_pos, radius, height, orientation
+        )
+        
+        # Use different color for each obstacle
+        color_scale = obstacle_colors[i % len(obstacle_colors)]
+        
+        # Add cylinder surface with exact geometry
+        fig.add_trace(go.Surface(
+            x=x_cyl,
+            y=y_cyl,
+            z=z_cyl,
+            name=f'Obstacle {i+1} Cylinder',
+            opacity=0.7,
+            colorscale=color_scale,
+            showscale=False,
+            hovertemplate=f'<b>Obstacle {i+1} Cylinder</b><br>' +
+                         'Center: [%.3f, %.3f, %.3f]<br>' % tuple(obstacle_pos) +
+                         'Radius: %.3fm<br>' % radius +
+                         'Height: %.3fm<br>' % height +
+                         'Orientation: %s<br>' % orientation +
+                         '<extra></extra>'
+        ))
+        
+        # Add cylinder caps with correct orientation
+        caps = create_cylinder_caps_with_orientation(obstacle_pos, radius, height, orientation)
+        
+        for j, (x_cap, y_cap, z_cap) in enumerate(caps):
+            fig.add_trace(go.Surface(
+                x=x_cap, y=y_cap, z=z_cap,
+                name=f'Obstacle {i+1} Cap {j+1}',
+                opacity=0.7,
+                colorscale=color_scale,
+                showscale=False,
+                showlegend=False,
+                hovertemplate=f'<b>Obstacle {i+1} End Cap</b><br>' +
+                             'Orientation: %s<br>' % orientation +
+                             '<extra></extra>'
+            ))
     
-    # Add cylinder top and bottom caps using extracted dimensions
-    theta = np.linspace(0, 2*np.pi, 20)
-    r = np.linspace(0, cylinder_radius, 10)
-    theta_cap, r_cap = np.meshgrid(theta, r)
-    
-    # Top cap
-    x_top = obstacle_pos[0] + r_cap * np.cos(theta_cap)
-    y_top = obstacle_pos[1] + r_cap * np.sin(theta_cap)
-    z_top = np.full_like(x_top, obstacle_pos[2] + cylinder_height/2)
-    
-    fig.add_trace(go.Surface(
-        x=x_top, y=y_top, z=z_top,
-        name='Cylinder Top',
-        opacity=0.7,
-        colorscale='Reds',
-        showscale=False,
-        showlegend=False
-    ))
-    
-    # Bottom cap
-    z_bottom = np.full_like(x_top, obstacle_pos[2] - cylinder_height/2)
-    fig.add_trace(go.Surface(
-        x=x_top, y=y_top, z=z_bottom,
-        name='Cylinder Bottom',
-        opacity=0.7,
-        colorscale='Reds',
-        showscale=False,
-        showlegend=False
-    ))
-    
-    # Create title with simulation info
+    # Create title with simulation info including exact geometry info
     sim_number = simulation_key.split('_')[1]
-    title_text = f'3D End-Effector Trajectory - Simulation {sim_number}'
+    title_text = f'3D End-Effector Trajectory - Simulation {sim_number} (Exact Geometry)'
     subtitle_parts = []
     
     # Add run folder info to subtitle
     subtitle_parts.append(f'Run: {RUN_FOLDER_NAME}')
     
-    # Add obstacle and target info
-    subtitle_parts.append(f'Obstacle: [{obstacle_pos[0]:.2f}, {obstacle_pos[1]:.2f}, {obstacle_pos[2]:.2f}]')
+    # Add obstacle count and target info
+    subtitle_parts.append(f'Obstacles: {num_obstacles}')
     subtitle_parts.append(f'Target: [{target_pos[0]:.2f}, {target_pos[1]:.2f}, {target_pos[2]:.2f}]')
     
     if 'goal_reached' in result:
@@ -367,6 +423,10 @@ def plot_3d_simulation(data, simulation_key, save_dir=None, json_filename=None):
     
     if 'goal_reach_time' in result and result['goal_reach_time'] is not None:
         subtitle_parts.append(f'Time: {result["goal_reach_time"]:.2f}s')
+    
+    # Add direct sampling info if available
+    if result.get('direct_sampling_used'):
+        subtitle_parts.append('Direct Sampling')
     
     if 'timestamp' in result:
         subtitle_parts.append(f'Date: {result["timestamp"][:19]}')
@@ -400,6 +460,25 @@ def plot_3d_simulation(data, simulation_key, save_dir=None, json_filename=None):
     # Add warning annotation if no real trajectory data
     if not has_real_trajectory:
         layout_dict['annotations'] = [create_placeholder_warning_message()]
+    else:
+        # Add obstacle details annotation box with exact geometry info
+        obstacle_text = f"Obstacle Details ({num_obstacles} total):<br>"
+        for i, (pos, size) in enumerate(zip(obstacle_positions, obstacle_sizes)):
+            obstacle_text += f"#{i+1}: [{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}]<br>"
+            obstacle_text += f"    h={size['height']:.2f}m, r={size['radius']:.2f}m<br>"
+            obstacle_text += f"    {size['orientation'].replace('_', ' ')}<br>"
+        
+        layout_dict['annotations'] = [{
+            'xref': "paper", 'yref': "paper",
+            'x': 0.02, 'y': 0.98,  # Top-left corner
+            'text': obstacle_text,
+            'showarrow': False,
+            'font': dict(size=10, color="black"),
+            'bgcolor': "rgba(255, 255, 255, 0.9)",
+            'bordercolor': "gray",
+            'borderwidth': 1,
+            'align': "left"
+        }]
     
     fig.update_layout(layout_dict)
     
@@ -411,9 +490,9 @@ def plot_3d_simulation(data, simulation_key, save_dir=None, json_filename=None):
     # Ensure save directory exists
     os.makedirs(save_dir, exist_ok=True)
     
-    # Create timestamped filenames
+    # Create timestamped filenames with obstacle count and geometry info
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base_name = f"3d_trajectory_{simulation_key}_{timestamp}"
+    base_name = f"3d_trajectory_{simulation_key}_{num_obstacles}obs_exact_geometry_{timestamp}"
     
     # Save as HTML
     html_filename = os.path.join(save_dir, f"{base_name}.html")
@@ -429,11 +508,17 @@ def plot_3d_simulation(data, simulation_key, save_dir=None, json_filename=None):
         print(f"Could not save PNG image: {e}")
         print("   Install kaleido for image export: pip install kaleido")
     
-    # Print summary with extracted data
-    print(f"\n3D Plot Summary for {simulation_key}:")
-    print(f"   Obstacle position: [{obstacle_pos[0]:.3f}, {obstacle_pos[1]:.3f}, {obstacle_pos[2]:.3f}]")
+    # Print summary with exact extracted geometry
+    print(f"\n3D Plot Summary for {simulation_key} (EXACT GEOMETRY):")
+    print(f"   Number of obstacles: {num_obstacles}")
+    
+    for i, (obs_pos, obs_size) in enumerate(zip(obstacle_positions, obstacle_sizes)):
+        print(f"   Obstacle {i+1}:")
+        print(f"     Position: [{obs_pos[0]:.3f}, {obs_pos[1]:.3f}, {obs_pos[2]:.3f}]")
+        print(f"     Exact size: height={obs_size['height']:.3f}m, radius={obs_size['radius']:.3f}m")
+        print(f"     Exact orientation: {obs_size['orientation']}")
+    
     print(f"   Target position: [{target_pos[0]:.3f}, {target_pos[1]:.3f}, {target_pos[2]:.3f}]")
-    print(f"   Cylinder dimensions: {cylinder_height}m height, {cylinder_radius}m radius")
     
     if has_real_trajectory:
         print(f"   Real trajectory points: {len(trajectory)}")
@@ -450,19 +535,29 @@ def plot_3d_simulation(data, simulation_key, save_dir=None, json_filename=None):
         # Distance from final position to target
         final_to_target = np.linalg.norm(trajectory[-1] - np.array(target_pos))
         print(f"   Final distance to target: {final_to_target:.3f}m")
+        
+        # Calculate minimum distance to each obstacle during trajectory (center-to-center)
+        if obstacle_positions:
+            print(f"   Minimum center-to-center distances to obstacles during trajectory:")
+            for i, obs_pos in enumerate(obstacle_positions):
+                min_dist_to_obs = float('inf')
+                for traj_point in trajectory:
+                    dist = np.linalg.norm(traj_point - np.array(obs_pos))
+                    min_dist_to_obs = min(min_dist_to_obs, dist)
+                print(f"     To obstacle {i+1}: {min_dist_to_obs:.3f}m (center-to-center)")
     else:
         print("   No real trajectory data available")
         print("   To get actual trajectories, modify evaluation_manager_rmp.py")
     
     # Show the plot
-    print(f"\nOpening 3D trajectory plot in browser...")
+    print(f"\nOpening 3D trajectory plot with EXACT geometry in browser...")
     fig.show()
     
     return fig
 
 def plot_3d_trajectories_from_file(json_filename, simulation_numbers=None, save_dir=None):
     """
-    Load JSON file and create 3D trajectory plots
+    Load JSON file and create 3D trajectory plots with exact geometry
     """
     
     # Check if file exists
@@ -494,6 +589,42 @@ def plot_3d_trajectories_from_file(json_filename, simulation_numbers=None, save_
     
     print(f"Found {len(available_sims)} simulations: {', '.join(available_sims)}")
     
+    # Show obstacle count and geometry distribution
+    obstacle_counts = {}
+    orientation_counts = {}
+    size_ranges = {'height': [], 'radius': []}
+    
+    for sim_key in available_sims:
+        num_obs = data[sim_key].get('num_obstacles', 'Unknown')
+        obstacle_sizes = data[sim_key].get('obstacle_sizes', [])
+        
+        if num_obs != 'Unknown':
+            obstacle_counts[num_obs] = obstacle_counts.get(num_obs, 0) + 1
+        
+        # Analyze orientations and sizes
+        for obs_size in obstacle_sizes:
+            orientation = obs_size.get('orientation', 'Unknown')
+            orientation_counts[orientation] = orientation_counts.get(orientation, 0) + 1
+            
+            if 'height' in obs_size and 'radius' in obs_size:
+                size_ranges['height'].append(obs_size['height'])
+                size_ranges['radius'].append(obs_size['radius'])
+    
+    if obstacle_counts:
+        print("Obstacle count distribution:")
+        for count, freq in sorted(obstacle_counts.items()):
+            print(f"  {count} obstacles: {freq} simulation(s)")
+    
+    if orientation_counts:
+        print("Orientation distribution:")
+        for orientation, freq in sorted(orientation_counts.items()):
+            print(f"  {orientation}: {freq} cylinder(s)")
+    
+    if size_ranges['height']:
+        print("Size ranges:")
+        print(f"  Height: {min(size_ranges['height']):.3f}m - {max(size_ranges['height']):.3f}m")
+        print(f"  Radius: {min(size_ranges['radius']):.3f}m - {max(size_ranges['radius']):.3f}m")
+    
     # Determine which simulations to plot
     if simulation_numbers is None:
         sims_to_plot = available_sims
@@ -508,7 +639,7 @@ def plot_3d_trajectories_from_file(json_filename, simulation_numbers=None, save_
         print("No valid simulations to plot!")
         return None
     
-    print(f"Creating 3D plots for {len(sims_to_plot)} simulation(s): {', '.join(sims_to_plot)}")
+    print(f"Creating 3D plots with EXACT geometry for {len(sims_to_plot)} simulation(s): {', '.join(sims_to_plot)}")
     
     # Plot each simulation separately
     figures = []
@@ -518,7 +649,7 @@ def plot_3d_trajectories_from_file(json_filename, simulation_numbers=None, save_
         if fig:
             figures.append((sim_key, fig))
     
-    print(f"\nSuccessfully created {len(figures)} 3D trajectory plots!")
+    print(f"\nSuccessfully created {len(figures)} 3D trajectory plots with EXACT geometry!")
     return figures
 
 def main():
@@ -538,7 +669,7 @@ def main():
     
     # Print configuration
     print("=" * 60)
-    print("3D TRAJECTORY PLOTTING TOOL")
+    print("3D TRAJECTORY PLOTTING TOOL - EXACT GEOMETRY VERSION")
     print("=" * 60)
     print(f"Base directory: {BASE_SIMULATION_DIR}")
     print(f"Run folder: {RUN_FOLDER_NAME}")
@@ -579,26 +710,24 @@ def main():
     # Determine which simulations to plot
     if PLOT_ALL_SIMULATIONS:
         simulation_numbers = None
-        print(f"\nConfiguration: Plot ALL simulations")
+        print(f"\nConfiguration: Plot ALL simulations with EXACT geometry")
     else:
         simulation_numbers = SPECIFIC_SIMULATIONS
-        print(f"\nConfiguration: Plot specific simulations: {SPECIFIC_SIMULATIONS}")
+        print(f"\nConfiguration: Plot specific simulations with EXACT geometry: {SPECIFIC_SIMULATIONS}")
     
     # Create plots
-    print(f"\nProcessing 3D trajectory data from: {json_file_path}")
+    print(f"\nProcessing 3D trajectory data with EXACT geometry from: {json_file_path}")
     figures = plot_3d_trajectories_from_file(json_file_path, simulation_numbers, run_dir)
     
     if figures is None:
         print(f"Failed to create plots")
     else:
-        print(f"\nSuccessfully created {len(figures)} 3D trajectory plots!")
+        print(f"\nSuccessfully created {len(figures)} 3D trajectory plots with EXACT geometry!")
         print(f"All plots saved to: {run_dir}")
-        print("\nTo get real trajectory data instead of approximations,")
-        print("modify evaluation_manager_rmp.py to store end-effector positions.")
 
 def show_usage():
     """Show usage information"""
-    print("3D Trajectory Plotting Script - Manual Configuration Mode")
+    print("3D Trajectory Plotting Script - Exact Geometry Version")
     print("=" * 60)
     print("To use this script:")
     print("1. Edit the configuration variables at the top of this file:")
@@ -608,14 +737,14 @@ def show_usage():
     print(f"   - SPECIFIC_SIMULATIONS (currently: {SPECIFIC_SIMULATIONS})")
     print()
     print("2. Run the script:")
-    print("   python3 plot_3d_trajectory.py")
+    print("   python3 3D_trajectory.py")
     print()
     print("3. Optional command line arguments:")
-    print("   python3 plot_3d_trajectory.py --list    # List available simulations")
-    print("   python3 plot_3d_trajectory.py --help    # Show this help")
+    print("   python3 3D_trajectory.py --list    # List available simulations")
+    print("   python3 3D_trajectory.py --help    # Show this help")
+    print()
+    print("This version uses EXACT cylinder geometry (size & orientation) from evaluation manager.")
     print("=" * 60)
-    print("\nNote: For real trajectories, modify evaluation_manager_rmp.py")
-    print("to store actual end-effector positions during simulation.")
 
 if __name__ == "__main__":
     # Handle command line arguments
