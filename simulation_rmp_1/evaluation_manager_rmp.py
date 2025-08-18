@@ -55,20 +55,20 @@ class EvaluationManager(Node):
         self.workspace_bounds = {'x': (0.2, 0.8), 'y': (-0.5, 0.5), 'z': (0.2, 0.8)}
         
         # MODIFIED: Random number of cylinders within range
-        self.min_cylinders = 2
-        self.max_cylinders = 3
+        self.min_cylinders = 3
+        self.max_cylinders = 5
         self.num_cylinders = random.randint(self.min_cylinders, self.max_cylinders)
         self.get_logger().info(f"Will spawn {self.num_cylinders} cylinders this simulation")
         
         # NEW: Cylinder size limits for random generation
-        self.max_cylinder_height = 0.4  # maximum height (meters)
+        self.max_cylinder_height = 0.65  # maximum height (meters)
         self.max_cylinder_radius = 0.12  # maximum radius (meters)
-        self.min_cylinder_height = 0.1   # minimum height
-        self.min_cylinder_radius = 0.05  # minimum radius
+        self.min_cylinder_height = 0.2   # minimum height
+        self.min_cylinder_radius = 0.08  # minimum radius
         
         # Valid spawn zone constraints (derived from geometric_collision_check)
-        self.min_distance_from_base = 0.25  # minimum safe distance from base
-        self.max_distance_from_base = 0.8   # maximum reach distance
+        self.min_distance_from_base = 0.40  # minimum safe distance from base
+        self.max_distance_from_base = 1.3   # maximum reach distance
         
         # NEW: Storage for obstacle information including sizes
         self.obstacle_info = []  # Will store [pose, height, radius, orientation] for each obstacle
@@ -86,6 +86,18 @@ class EvaluationManager(Node):
         # NEW: Latest distance data storage for regular sampling
         self.latest_distance_msg = None
         self.distance_data_lock = threading.Lock()
+        
+        # NEW: Path tracking variables for distance metrics
+        self.start_ee_position = None
+        self.end_ee_position = None
+        self.previous_ee_position = None
+        self.total_distance_traveled = 0.0
+        self.path_positions = []  # Store all positions for debugging
+        
+        # NEW: Curvature tracking variables
+        self.total_curvature = 0.0
+        self.curvature_values = []  # Store individual curvature values for debugging
+        self.previous_direction = None  # Store previous direction vector for curvature calculation
         
         self.wait_for_dependencies()
         self.get_logger().info("Starting single simulation...")
@@ -110,6 +122,43 @@ class EvaluationManager(Node):
         with self.distance_data_lock:
             self.latest_distance_msg = msg
 
+    def calculate_curvature_between_points(self, p1, p2, p3):
+        """
+        Calculate curvature at point p2 given three consecutive points p1, p2, p3.
+        Uses the formula: curvature = |angle between vectors| / average_segment_length
+        
+        Args:
+            p1, p2, p3: numpy arrays representing 3D points
+            
+        Returns:
+            curvature: float representing curvature at p2 (rad/m)
+        """
+        # Calculate vectors
+        v1 = p2 - p1  # vector from p1 to p2
+        v2 = p3 - p2  # vector from p2 to p3
+        
+        # Calculate lengths
+        len1 = np.linalg.norm(v1)
+        len2 = np.linalg.norm(v2)
+        
+        # Avoid division by zero
+        if len1 < 1e-6 or len2 < 1e-6:
+            return 0.0
+        
+        # Normalize vectors
+        v1_normalized = v1 / len1
+        v2_normalized = v2 / len2
+        
+        # Calculate angle between vectors using dot product
+        dot_product = np.clip(np.dot(v1_normalized, v2_normalized), -1.0, 1.0)
+        angle = np.arccos(dot_product)
+        
+        # Calculate curvature = angle / average segment length
+        average_length = (len1 + len2) / 2.0
+        curvature = angle / average_length if average_length > 1e-6 else 0.0
+        
+        return curvature
+
     def regular_sampling_callback(self):
         """Regular timer callback to sample data at fixed intervals"""
         if not self.is_recording:
@@ -120,6 +169,41 @@ class EvaluationManager(Node):
         
         # Get current end-effector position for trajectory recording
         current_ee_pos = self.get_end_effector_position()
+        
+        # NEW: Track path distance and curvature if we have a valid position
+        if current_ee_pos is not None:
+            # Store the start position on first valid reading
+            if self.start_ee_position is None:
+                self.start_ee_position = current_ee_pos.copy()
+                self.get_logger().info(f"Start position recorded: [{self.start_ee_position[0]:.3f}, {self.start_ee_position[1]:.3f}, {self.start_ee_position[2]:.3f}]")
+            
+            # Calculate incremental distance if we have a previous position
+            if self.previous_ee_position is not None:
+                distance_increment = np.linalg.norm(current_ee_pos - self.previous_ee_position)
+                self.total_distance_traveled += distance_increment
+            
+            # NEW: Calculate curvature if we have at least 3 points
+            if len(self.path_positions) >= 2:
+                # We have p1 (second-to-last), p2 (last), and p3 (current)
+                p1 = self.path_positions[-2]
+                p2 = self.path_positions[-1]
+                p3 = current_ee_pos
+                
+                # Calculate curvature at p2
+                curvature = self.calculate_curvature_between_points(p1, p2, p3)
+                self.total_curvature += curvature
+                self.curvature_values.append(curvature)
+                
+                # Log high curvature events
+                if curvature > 10.0:  # High curvature threshold (rad/m)
+                    self.get_logger().debug(f"High curvature detected: {curvature:.3f} rad/m at t={relative_time:.2f}s")
+            
+            # Update previous position and store current position
+            self.previous_ee_position = current_ee_pos.copy()
+            self.path_positions.append(current_ee_pos.copy())
+            
+            # Always update end position (will be the final position when recording stops)
+            self.end_ee_position = current_ee_pos.copy()
         
         # Get latest distance data (thread-safe)
         with self.distance_data_lock:
@@ -221,30 +305,127 @@ class EvaluationManager(Node):
     def sample_valid_position_directly(self):
         """
         Directly sample a position that satisfies all constraints without iteration.
-        Uses polar coordinates to ensure distance constraints from robot base are met.
+        Uses cylindrical coordinates to ensure distance constraints from robot base are met.
+        Now uses cylindrical volumes instead of circular areas.
         """
-        # Sample distance from base within valid range
-        # Use uniform distribution in area (not radius) for uniform spatial distribution
-        min_area = np.pi * self.min_distance_from_base**2
-        max_area = np.pi * self.max_distance_from_base**2
-        random_area = random.uniform(min_area, max_area)
-        radius = np.sqrt(random_area / np.pi)
+        # MODIFIED: Use cylindrical volumes instead of circular areas
+        cylinder_height = 0.7  # Height of the constraint cylinder (meters)
         
-        # Sample random angle
+        # Calculate volumes of cylinders (not areas of circles)
+        min_volume = np.pi * self.min_distance_from_base**2 * cylinder_height  # π × 0.4² × 0.7
+        max_volume = np.pi * self.max_distance_from_base**2 * cylinder_height  # π × 1.2² × 0.7
+        
+        # Sample random volume uniformly within the cylindrical shell
+        random_volume = random.uniform(min_volume, max_volume)
+        
+        # Convert volume back to radius (assuming fixed height)
+        # V = π × r² × h  =>  r = √(V / (π × h))
+        radius = np.sqrt(random_volume / (np.pi * cylinder_height))
+        
+        # Sample random angle (same as before)
         theta = random.uniform(0, 2 * np.pi)
         
         # Convert to cartesian coordinates
         x = radius * np.cos(theta)
         y = radius * np.sin(theta)
         
-        # Sample Z within workspace bounds
-        z = random.uniform(*self.workspace_bounds['z'])
+        # MODIFIED: Sample Z within the cylinder height constraint
+        # The constraint cylinder goes from Z=0 to Z=cylinder_height
+        # But we also need to respect workspace bounds
+        max_z_constraint = min(cylinder_height, self.workspace_bounds['z'][1])  # min(0.7, 0.8) = 0.7
+        min_z_constraint = max(0.0, self.workspace_bounds['z'][0])              # max(0.0, 0.2) = 0.2
+        
+        z = random.uniform(min_z_constraint, max_z_constraint)  # Sample between 0.2 and 0.7
         
         # Ensure position is within workspace bounds (clip if necessary)
         x = np.clip(x, *self.workspace_bounds['x'])
         y = np.clip(y, *self.workspace_bounds['y'])
+        z = np.clip(z, min_z_constraint, max_z_constraint)
         
         return x, y, z
+
+    def check_object_collision_with_inner_cylinder(self, object_pose, object_height, object_radius, object_orientation):
+        """
+        Check if a cylindrical object intersects with the inner forbidden cylinder.
+        
+        Args:
+            object_pose: Pose of the object
+            object_height: Height of the object
+            object_radius: Radius of the object  
+            object_orientation: Orientation type ('vertical', 'horizontal_x', 'horizontal_y')
+        
+        Returns:
+            bool: True if collision detected, False if safe
+        """
+        inner_cylinder_radius = self.min_distance_from_base  # 0.4m
+        inner_cylinder_height = 0.7  # 0.7m (from ground up)
+        
+        # Object center position
+        obj_x = object_pose.position.x
+        obj_y = object_pose.position.y
+        obj_z = object_pose.position.z
+        
+        # Check based on object orientation
+        if object_orientation == 'vertical':
+            # Vertical cylinder: check radial distance and Z overlap
+            radial_distance = np.sqrt(obj_x**2 + obj_y**2)
+            
+            # Object extends from obj_z - object_height/2 to obj_z + object_height/2
+            obj_bottom = obj_z - object_height / 2
+            obj_top = obj_z + object_height / 2
+            
+            # Inner cylinder extends from 0 to inner_cylinder_height
+            inner_bottom = 0.0
+            inner_top = inner_cylinder_height
+            
+            # Check Z-axis overlap
+            z_overlap = not (obj_top <= inner_bottom or obj_bottom >= inner_top)
+            
+            # Check radial collision (including clearance)
+            radial_collision = radial_distance < (inner_cylinder_radius + object_radius)
+            
+            return z_overlap and radial_collision
+            
+        elif object_orientation == 'horizontal_x':
+            # Horizontal along X-axis: cylinder extends along X direction
+            # Check distance in Y-Z plane to inner cylinder axis
+            
+            # Object extends from obj_x - object_height/2 to obj_x + object_height/2
+            obj_x_min = obj_x - object_height / 2
+            obj_x_max = obj_x + object_height / 2
+            
+            # Check if object intersects the Y-Z plane within inner cylinder radius
+            # Distance from object axis to robot base in Y-Z plane
+            yz_distance = np.sqrt(obj_y**2 + obj_z**2)
+            
+            # Check if any part of the horizontal cylinder is within the inner cylinder's volume
+            # The object can collide if:
+            # 1. Its axis (in Y-Z plane) is close enough to the inner cylinder axis
+            # 2. Its X-extent overlaps with the inner cylinder's X-extent (assumed centered at origin)
+            
+            axis_collision = yz_distance < (inner_cylinder_radius + object_radius)
+            
+            # Check X-axis overlap (assuming inner cylinder is centered at origin)
+            x_overlap = not (obj_x_max <= 0 or obj_x_min >= 0)  # Simplified: assumes inner cylinder at X=0
+            
+            return axis_collision and x_overlap
+            
+        elif object_orientation == 'horizontal_y':
+            # Horizontal along Y-axis: similar logic to horizontal_x but for Y direction
+            obj_y_min = obj_y - object_height / 2
+            obj_y_max = obj_y + object_height / 2
+            
+            # Distance from object axis to robot base in X-Z plane
+            xz_distance = np.sqrt(obj_x**2 + obj_z**2)
+            
+            axis_collision = xz_distance < (inner_cylinder_radius + object_radius)
+            
+            # Check Y-axis overlap
+            y_overlap = not (obj_y_max <= 0 or obj_y_min >= 0)
+            
+            return axis_collision and y_overlap
+        
+        return False  # Default: no collision
 
     def generate_random_orientation(self):
         """Generate random orientation for cylinder"""
@@ -275,45 +456,69 @@ class EvaluationManager(Node):
 
     def generate_multiple_obstacle_poses_direct(self):
         """
-        Generate multiple obstacle poses directly respecting constraints
-        No iterative searching - each position is guaranteed to be valid
-        Now includes random sizes for each cylinder
+        Generate multiple obstacle poses directly respecting constraints.
+        Now includes collision checking with inner forbidden cylinder.
         """
         obstacle_poses = []
-        self.obstacle_info = []  # Reset obstacle info
+        self.obstacle_info = []
+        max_attempts_per_obstacle = 100  # Retry limit per obstacle
         
         for cylinder_idx in range(self.num_cylinders):
             self.get_logger().info(f"Generating obstacle {cylinder_idx + 1}/{self.num_cylinders}...")
             
-            # Generate random size for this cylinder
-            height, radius = self.generate_random_cylinder_size()
+            placed = False
+            attempts = 0
             
-            # Directly sample valid position
-            x, y, z = self.sample_valid_position_directly()
+            while not placed and attempts < max_attempts_per_obstacle:
+                attempts += 1
+                
+                # Generate random size for this cylinder
+                height, radius = self.generate_random_cylinder_size()
+                
+                # Generate random orientation first (needed for collision checking)
+                temp_pose = Pose()
+                orientation, orientation_type = self.generate_random_orientation()
+                temp_pose.orientation = orientation
+                
+                # Directly sample valid position
+                x, y, z = self.sample_valid_position_directly()
+                temp_pose.position.x = x
+                temp_pose.position.y = y
+                temp_pose.position.z = z
+                
+                # NEW: Check collision with inner forbidden cylinder
+                collision_detected = self.check_object_collision_with_inner_cylinder(
+                    temp_pose, height, radius, orientation_type
+                )
+                
+                if not collision_detected:
+                    # Safe position found!
+                    obstacle_poses.append(temp_pose)
+                    
+                    # Store obstacle information including size
+                    self.obstacle_info.append({
+                        'pose': temp_pose,
+                        'height': height,
+                        'radius': radius,
+                        'orientation': orientation_type
+                    })
+                    
+                    orientation_str = orientation_type.replace('_', ' ')
+                    self.get_logger().info(f"  ✓ Obstacle {cylinder_idx + 1} placed at [{x:.3f}, {y:.3f}, {z:.3f}] ({orientation_str})")
+                    self.get_logger().info(f"    Size: height={height:.3f}m, radius={radius:.3f}m")
+                    self.get_logger().info(f"    Attempts needed: {attempts}")
+                    placed = True
+                else:
+                    if attempts % 20 == 0:  # Log every 20 attempts
+                        self.get_logger().debug(f"  Attempt {attempts}: Collision with inner cylinder detected, retrying...")
             
-            # Create pose
-            pose = Pose()
-            pose.position.x = x
-            pose.position.y = y
-            pose.position.z = z
-            
-            # Generate random orientation
-            pose.orientation, orientation_type = self.generate_random_orientation()
-            
-            obstacle_poses.append(pose)
-            
-            # Store obstacle information including size
-            self.obstacle_info.append({
-                'pose': pose,
-                'height': height,
-                'radius': radius,
-                'orientation': orientation_type
-            })
-            
-            orientation_str = orientation_type.replace('_', ' ')
-            self.get_logger().info(f"  Obstacle {cylinder_idx + 1} placed at [{pose.position.x:.3f}, {pose.position.y:.3f}, {pose.position.z:.3f}] ({orientation_str})")
-            self.get_logger().info(f"  Size: height={height:.3f}m, radius={radius:.3f}m")
+            if not placed:
+                self.get_logger().error(f"Failed to place obstacle {cylinder_idx + 1} after {max_attempts_per_obstacle} attempts")
+                self.get_logger().error("Consider adjusting constraints or cylinder sizes")
+                # Could either skip this obstacle or use a fallback position
+                continue
         
+        self.get_logger().info(f"Successfully placed {len(obstacle_poses)}/{self.num_cylinders} obstacles")
         return obstacle_poses
 
     def sample_valid_target_directly(self, obstacle_poses):
@@ -524,6 +729,18 @@ class EvaluationManager(Node):
         self.simulation_start_time = time.time()
         self.is_recording = True
         
+        # NEW: Reset path tracking variables
+        self.start_ee_position = None
+        self.end_ee_position = None
+        self.previous_ee_position = None
+        self.total_distance_traveled = 0.0
+        self.path_positions = []
+        
+        # NEW: Reset curvature tracking variables
+        self.total_curvature = 0.0
+        self.curvature_values = []
+        self.previous_direction = None
+        
         # Start regular sampling timer
         sampling_interval = 1.0 / self.sampling_rate  # Convert Hz to seconds
         self.sampling_timer = self.create_timer(sampling_interval, self.regular_sampling_callback)
@@ -595,6 +812,69 @@ class EvaluationManager(Node):
             self.get_logger().warn("  Continuing anyway - obstacles may not be properly loaded")
             return False
 
+    def calculate_path_metrics(self):
+        """Calculate path efficiency metrics including curvature"""
+        if self.start_ee_position is None or self.end_ee_position is None:
+            return {
+                'total_distance_traveled': None,
+                'straight_line_distance': None,
+                'path_efficiency_ratio': None,
+                'total_curvature': None,
+                'average_curvature': None,
+                'max_curvature': None,
+                'curvature_per_distance': None,
+                'error': 'Start or end position not recorded'
+            }
+        
+        # Calculate straight-line distance from start to end
+        straight_line_distance = np.linalg.norm(self.end_ee_position - self.start_ee_position)
+        
+        # Calculate path efficiency ratio (total distance / straight line distance)
+        path_efficiency_ratio = None
+        if straight_line_distance > 0:
+            path_efficiency_ratio = self.total_distance_traveled / straight_line_distance
+        
+        # NEW: Calculate curvature metrics
+        average_curvature = None
+        max_curvature = None
+        curvature_per_distance = None
+        normalized_total_curvature = None
+        curvature_per_sampled_point = None 
+        
+        if len(self.curvature_values) > 0:
+            average_curvature = np.mean(self.curvature_values)
+            max_curvature = np.max(self.curvature_values)
+            
+            # Calculate curvature per unit distance traveled
+            if self.total_distance_traveled > 0:
+                curvature_per_distance = self.total_curvature / self.total_distance_traveled
+
+            if straight_line_distance > 0:
+                normalized_total_curvature = self.total_curvature / straight_line_distance
+
+        # NEW: Calculate curvature per sampled point
+        total_sampled_points = len(self.distance_data)  # Total number of data points collected
+        if total_sampled_points > 0:
+            curvature_per_sampled_point = self.total_curvature / total_sampled_points
+        
+        return {
+            'total_distance_traveled': self.total_distance_traveled,
+            'straight_line_distance': straight_line_distance,
+            'path_efficiency_ratio': path_efficiency_ratio,
+            'start_position': self.start_ee_position.tolist(),
+            'end_position': self.end_ee_position.tolist(),
+            'num_path_points': len(self.path_positions),
+            'total_sampled_points': total_sampled_points,  # Total data points collected
+            # Curvature metrics
+            'total_curvature': self.total_curvature,
+            'average_curvature': average_curvature,
+            'max_curvature': max_curvature,
+            'curvature_per_distance': curvature_per_distance,
+            'normalized_total_curvature': normalized_total_curvature,  # Complexity: total curvature / straight-line distance
+            'curvature_per_sampled_point': curvature_per_sampled_point,  # Average curvature per data point
+            'num_curvature_points': len(self.curvature_values)
+        }
+
     def run_single_simulation(self):
         # Generate obstacles directly (no iteration needed)
         obstacles = self.generate_multiple_obstacle_poses_direct()
@@ -664,6 +944,9 @@ class EvaluationManager(Node):
         # Stop recording
         self.stop_recording()
         
+        # NEW: Calculate path metrics including curvature
+        path_metrics = self.calculate_path_metrics()
+        
         # Analyze distance data
         analysis = self.analyze_distance_data()
         
@@ -702,7 +985,9 @@ class EvaluationManager(Node):
             'total_samples_collected': len(self.distance_data),
             'max_samples_configured': self.max_samples,
             # NEW: Obstacle loading confirmation
-            'obstacles_properly_loaded': obstacles_ready
+            'obstacles_properly_loaded': obstacles_ready,
+            # NEW: Path efficiency metrics including curvature
+            'path_metrics': path_metrics
         }
         return result
 
@@ -775,6 +1060,38 @@ class EvaluationManager(Node):
             self.get_logger().info(f"  Time to reach goal: {result['goal_reach_time']:.2f}s")
         self.get_logger().info(f"  Goal tolerance: {result.get('goal_tolerance', 'N/A')}m")
         self.get_logger().info(f"  Position checks: {result.get('successful_position_checks', 0)}/{result.get('position_check_count', 0)}")
+        
+        #Print path efficiency metrics including curvature
+        if 'path_metrics' in result and result['path_metrics'].get('total_distance_traveled') is not None:
+            path_metrics = result['path_metrics']
+            self.get_logger().info(f"Path Efficiency Summary:")
+            self.get_logger().info(f"  Total distance traveled: {path_metrics['total_distance_traveled']:.3f}m")
+            self.get_logger().info(f"  Straight-line distance: {path_metrics['straight_line_distance']:.3f}m")
+            if path_metrics['path_efficiency_ratio'] is not None:
+                self.get_logger().info(f"  Path efficiency ratio: {path_metrics['path_efficiency_ratio']:.2f}")
+            self.get_logger().info(f"  Path points recorded: {path_metrics['num_path_points']}")
+            
+            #Print curvature metrics
+            if path_metrics.get('total_curvature') is not None:
+                self.get_logger().info(f"Trajectory Curvature Summary:")
+                self.get_logger().info(f"  Total curvature: {path_metrics['total_curvature']:.3f} rad")
+                if path_metrics.get('average_curvature') is not None:
+                    self.get_logger().info(f"  Average curvature: {path_metrics['average_curvature']:.3f} rad/m")
+                if path_metrics.get('max_curvature') is not None:
+                    self.get_logger().info(f"  Maximum curvature: {path_metrics['max_curvature']:.3f} rad/m")
+                if path_metrics.get('curvature_per_distance') is not None:
+                    self.get_logger().info(f"  Curvature per distance: {path_metrics['curvature_per_distance']:.3f} rad/m")
+                if path_metrics.get('normalized_total_curvature') is not None:
+                    self.get_logger().info(f"  Normalized total curvature: {path_metrics['normalized_total_curvature']:.3f} rad/m")
+                #Add curvature per sampled point logging
+                if path_metrics.get('curvature_per_sampled_point') is not None:
+                    self.get_logger().info(f"  Curvature per sampled point: {path_metrics['curvature_per_sampled_point']:.4f} rad/point")
+                #Add total sampled points for context
+                if path_metrics.get('total_sampled_points') is not None:
+                    self.get_logger().info(f"  Total sampled points: {path_metrics['total_sampled_points']}")
+                self.get_logger().info(f"  Curvature points calculated: {path_metrics.get('num_curvature_points', 0)}")
+        else:
+            self.get_logger().warn("Path metrics not available - end-effector position tracking failed")
         
         # Print obstacle summary with sizes
         self.get_logger().info(f"Obstacle Summary:")

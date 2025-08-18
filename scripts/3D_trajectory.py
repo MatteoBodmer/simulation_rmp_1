@@ -7,6 +7,7 @@ This script creates 3D visualizations showing:
 - Multiple obstacle cylinder positions with EXACT sizes and orientations from simulation
 - Target position (automatically extracted from evaluation data)
 - Start position (automatically extracted from evaluation data)
+- Straight-line distance from start to target (NEW)
 
 Command: python3 /home/matteo/franka_ros2_ws/src/simulation_rmp_1/scripts/3D_trajectory.py
 
@@ -16,7 +17,7 @@ CONFIGURATION - Edit these variables at the top:
 # ==================== MANUAL CONFIGURATION ====================
 # Edit these variables to specify which data to plot:
 
-RUN_FOLDER_NAME = "Run_20250814_145854"  # Name of the run folder
+RUN_FOLDER_NAME = "Run_20250818_103405"  # Name of the run folder
 JSON_FILENAME = "evaluation_results_with_distances.json"  # Name of the JSON file
 
 # Specify which simulations to plot:
@@ -234,6 +235,9 @@ def plot_3d_simulation(data, simulation_key, save_dir=None, json_filename=None):
     target_pos = result.get('target_position')
     num_obstacles = result.get('num_obstacles', len(obstacle_positions))
     
+    # NEW: Extract path metrics for straight-line distance
+    path_metrics = result.get('path_metrics', {})
+    
     if not obstacle_positions or not target_pos:
         print(f"Error: Missing position data in {simulation_key}")
         print(f"  Obstacle positions: {len(obstacle_positions) if obstacle_positions else 0}")
@@ -261,6 +265,16 @@ def plot_3d_simulation(data, simulation_key, save_dir=None, json_filename=None):
         print(f"    Orientation: {obs_size['orientation']}")
     
     print(f"  Target at: [{target_pos[0]:.3f}, {target_pos[1]:.3f}, {target_pos[2]:.3f}]")
+    
+    # NEW: Print path metrics info
+    if path_metrics:
+        print(f"  Path metrics available:")
+        if path_metrics.get('total_distance_traveled') is not None:
+            print(f"    Total distance: {path_metrics['total_distance_traveled']:.3f}m")
+        if path_metrics.get('straight_line_distance') is not None:
+            print(f"    Straight-line distance: {path_metrics['straight_line_distance']:.3f}m")
+        if path_metrics.get('path_efficiency_ratio') is not None:
+            print(f"    Path efficiency ratio: {path_metrics['path_efficiency_ratio']:.2f}")
     
     # Create the 3D plot
     fig = go.Figure()
@@ -290,10 +304,11 @@ def plot_3d_simulation(data, simulation_key, save_dir=None, json_filename=None):
         ))
         
         # Add start position marker
+        start_pos = trajectory[0]
         fig.add_trace(go.Scatter3d(
-            x=[trajectory[0, 0]],
-            y=[trajectory[0, 1]],
-            z=[trajectory[0, 2]],
+            x=[start_pos[0]],
+            y=[start_pos[1]],
+            z=[start_pos[2]],
             mode='markers',
             name='Start Position',
             marker=dict(size=8, color='darkgreen', symbol='circle', 
@@ -306,10 +321,11 @@ def plot_3d_simulation(data, simulation_key, save_dir=None, json_filename=None):
         ))
         
         # Add final position marker
+        final_pos = trajectory[-1]
         fig.add_trace(go.Scatter3d(
-            x=[trajectory[-1, 0]],
-            y=[trajectory[-1, 1]],
-            z=[trajectory[-1, 2]],
+            x=[final_pos[0]],
+            y=[final_pos[1]],
+            z=[final_pos[2]],
             mode='markers',
             name='Final Position',
             marker=dict(size=8, color='darkorange', symbol='square',
@@ -320,6 +336,28 @@ def plot_3d_simulation(data, simulation_key, save_dir=None, json_filename=None):
                          'Z: %{z:.3f}m<br>' +
                          '<extra></extra>'
         ))
+        
+        # NEW: Add straight-line distance from start to target 
+        straight_line_distance = path_metrics.get('straight_line_distance', 'N/A')
+        fig.add_trace(go.Scatter3d(
+            x=[start_pos[0], target_pos[0]],
+            y=[start_pos[1], target_pos[1]],
+            z=[start_pos[2], target_pos[2]],
+            mode='lines',
+            name=f'Straight Line (d={straight_line_distance:.3f}m)' if isinstance(straight_line_distance, (int, float)) else 'Straight Line',
+            line=dict(
+                color='black',  
+                width=6,           # Thin
+                dash='dot'         # Dotted
+            ),
+            hovertemplate='<b>Straight-Line Distance</b><br>' +
+                         'Distance: %{text}<br>' +
+                         'Start: [%.3f, %.3f, %.3f]<br>' % tuple(start_pos) +
+                         'Target: [%.3f, %.3f, %.3f]<br>' % tuple(target_pos) +
+                         '<extra></extra>',
+            text=f'{straight_line_distance:.3f}m' if isinstance(straight_line_distance, (int, float)) else 'N/A'
+        ))
+        
     else:
         print("  Warning: No real trajectory data available - showing positions only")
         
@@ -337,6 +375,25 @@ def plot_3d_simulation(data, simulation_key, save_dir=None, json_filename=None):
                          'X: %{x:.3f}m<br>' +
                          'Y: %{y:.3f}m<br>' +
                          'Z: %{z:.3f}m<br>' +
+                         '<extra></extra>'
+        ))
+        
+        # NEW: Add approximate straight-line from approximate start to target
+        fig.add_trace(go.Scatter3d(
+            x=[approx_start[0], target_pos[0]],
+            y=[approx_start[1], target_pos[1]],
+            z=[approx_start[2], target_pos[2]],
+            mode='lines',
+            name='Approx Straight Line',
+            line=dict(
+                color='lightgray',  # Light colored
+                width=2,           # Thin
+                dash='dot'         # Dotted
+            ),
+            hovertemplate='<b>Approximate Straight-Line Distance</b><br>' +
+                         'From approx start to target<br>' +
+                         'Start: [%.3f, %.3f, %.3f]<br>' % tuple(approx_start) +
+                         'Target: [%.3f, %.3f, %.3f]<br>' % tuple(target_pos) +
                          '<extra></extra>'
         ))
     
@@ -461,12 +518,22 @@ def plot_3d_simulation(data, simulation_key, save_dir=None, json_filename=None):
     if not has_real_trajectory:
         layout_dict['annotations'] = [create_placeholder_warning_message()]
     else:
-        # Add obstacle details annotation box with exact geometry info
+        # Add obstacle details annotation box with exact geometry info AND path metrics
         obstacle_text = f"Obstacle Details ({num_obstacles} total):<br>"
         for i, (pos, size) in enumerate(zip(obstacle_positions, obstacle_sizes)):
             obstacle_text += f"#{i+1}: [{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}]<br>"
             obstacle_text += f"    h={size['height']:.2f}m, r={size['radius']:.2f}m<br>"
             obstacle_text += f"    {size['orientation'].replace('_', ' ')}<br>"
+        
+        # NEW: Add path metrics to annotation
+        if path_metrics:
+            obstacle_text += f"<br>Path Metrics:<br>"
+            if path_metrics.get('total_distance_traveled') is not None:
+                obstacle_text += f"Total distance: {path_metrics['total_distance_traveled']:.3f}m<br>"
+            if path_metrics.get('straight_line_distance') is not None:
+                obstacle_text += f"Straight line: {path_metrics['straight_line_distance']:.3f}m<br>"
+            if path_metrics.get('path_efficiency_ratio') is not None:
+                obstacle_text += f"Efficiency ratio: {path_metrics['path_efficiency_ratio']:.2f}<br>"
         
         layout_dict['annotations'] = [{
             'xref': "paper", 'yref': "paper",
@@ -532,6 +599,19 @@ def plot_3d_simulation(data, simulation_key, save_dir=None, json_filename=None):
             total_distance += dist
         print(f"   Total trajectory length: {total_distance:.3f}m")
         
+        # NEW: Print straight-line distance information
+        if path_metrics.get('straight_line_distance') is not None:
+            print(f"   Straight-line distance (start to target): {path_metrics['straight_line_distance']:.3f}m")
+            if path_metrics.get('path_efficiency_ratio') is not None:
+                print(f"   Path efficiency ratio: {path_metrics['path_efficiency_ratio']:.2f}")
+        else:
+            # Calculate it manually if not in path_metrics
+            straight_dist = np.linalg.norm(np.array(target_pos) - trajectory[0])
+            print(f"   Straight-line distance (calculated): {straight_dist:.3f}m")
+            if total_distance > 0:
+                efficiency = total_distance / straight_dist
+                print(f"   Path efficiency ratio (calculated): {efficiency:.2f}")
+        
         # Distance from final position to target
         final_to_target = np.linalg.norm(trajectory[-1] - np.array(target_pos))
         print(f"   Final distance to target: {final_to_target:.3f}m")
@@ -548,9 +628,10 @@ def plot_3d_simulation(data, simulation_key, save_dir=None, json_filename=None):
     else:
         print("   No real trajectory data available")
         print("   To get actual trajectories, modify evaluation_manager_rmp.py")
+        print("   Showing approximate straight-line distance")
     
     # Show the plot
-    print(f"\nOpening 3D trajectory plot with EXACT geometry in browser...")
+    print(f"\nOpening 3D trajectory plot with EXACT geometry and straight-line distance in browser...")
     fig.show()
     
     return fig
@@ -639,7 +720,7 @@ def plot_3d_trajectories_from_file(json_filename, simulation_numbers=None, save_
         print("No valid simulations to plot!")
         return None
     
-    print(f"Creating 3D plots with EXACT geometry for {len(sims_to_plot)} simulation(s): {', '.join(sims_to_plot)}")
+    print(f"Creating 3D plots with EXACT geometry and straight-line distances for {len(sims_to_plot)} simulation(s): {', '.join(sims_to_plot)}")
     
     # Plot each simulation separately
     figures = []
@@ -649,7 +730,7 @@ def plot_3d_trajectories_from_file(json_filename, simulation_numbers=None, save_
         if fig:
             figures.append((sim_key, fig))
     
-    print(f"\nSuccessfully created {len(figures)} 3D trajectory plots with EXACT geometry!")
+    print(f"\nSuccessfully created {len(figures)} 3D trajectory plots with EXACT geometry and straight-line distances!")
     return figures
 
 def main():
@@ -669,7 +750,7 @@ def main():
     
     # Print configuration
     print("=" * 60)
-    print("3D TRAJECTORY PLOTTING TOOL - EXACT GEOMETRY VERSION")
+    print("3D TRAJECTORY PLOTTING TOOL - EXACT GEOMETRY VERSION WITH STRAIGHT-LINE DISTANCE")
     print("=" * 60)
     print(f"Base directory: {BASE_SIMULATION_DIR}")
     print(f"Run folder: {RUN_FOLDER_NAME}")
@@ -710,24 +791,24 @@ def main():
     # Determine which simulations to plot
     if PLOT_ALL_SIMULATIONS:
         simulation_numbers = None
-        print(f"\nConfiguration: Plot ALL simulations with EXACT geometry")
+        print(f"\nConfiguration: Plot ALL simulations with EXACT geometry and straight-line distances")
     else:
         simulation_numbers = SPECIFIC_SIMULATIONS
-        print(f"\nConfiguration: Plot specific simulations with EXACT geometry: {SPECIFIC_SIMULATIONS}")
+        print(f"\nConfiguration: Plot specific simulations with EXACT geometry and straight-line distances: {SPECIFIC_SIMULATIONS}")
     
     # Create plots
-    print(f"\nProcessing 3D trajectory data with EXACT geometry from: {json_file_path}")
+    print(f"\nProcessing 3D trajectory data with EXACT geometry and straight-line distances from: {json_file_path}")
     figures = plot_3d_trajectories_from_file(json_file_path, simulation_numbers, run_dir)
     
     if figures is None:
         print(f"Failed to create plots")
     else:
-        print(f"\nSuccessfully created {len(figures)} 3D trajectory plots with EXACT geometry!")
+        print(f"\nSuccessfully created {len(figures)} 3D trajectory plots with EXACT geometry and straight-line distances!")
         print(f"All plots saved to: {run_dir}")
 
 def show_usage():
     """Show usage information"""
-    print("3D Trajectory Plotting Script - Exact Geometry Version")
+    print("3D Trajectory Plotting Script - Exact Geometry Version with Straight-Line Distance")
     print("=" * 60)
     print("To use this script:")
     print("1. Edit the configuration variables at the top of this file:")
@@ -743,7 +824,8 @@ def show_usage():
     print("   python3 3D_trajectory.py --list    # List available simulations")
     print("   python3 3D_trajectory.py --help    # Show this help")
     print()
-    print("This version uses EXACT cylinder geometry (size & orientation) from evaluation manager.")
+    print("This version uses EXACT cylinder geometry (size & orientation) from evaluation manager")
+    print("and includes straight-line distance visualization from start to target.")
     print("=" * 60)
 
 if __name__ == "__main__":

@@ -13,7 +13,7 @@ CONFIGURATION - Edit these variables at the top:
 # ==================== MANUAL CONFIGURATION ====================
 # Edit these variables to specify which data to plot:
 
-RUN_FOLDER_NAME = "Run_20250814_145854"  # Name of the run folder (e.g., "Run_20250808_143022")
+RUN_FOLDER_NAME = "Run_20250818_103405"  # Name of the run folder (e.g., "Run_20250808_143022")
 JSON_FILENAME = "evaluation_results_with_distances.json"  # Name of the JSON file
 
 # Specify which simulations to plot:
@@ -21,7 +21,7 @@ JSON_FILENAME = "evaluation_results_with_distances.json"  # Name of the JSON fil
 PLOT_ALL_SIMULATIONS = True
 
 # Option 2: Plot specific simulation numbers (set PLOT_ALL_SIMULATIONS = False first)
-SPECIFIC_SIMULATIONS = [1, 2, 3]  # List of simulation numbers to plot
+SPECIFIC_SIMULATIONS = [2]  # List of simulation numbers to plot
 
 # Base directory (usually doesn't need to be changed)
 BASE_SIMULATION_DIR = "/home/matteo/Simulation_rmp"

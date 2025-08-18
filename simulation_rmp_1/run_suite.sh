@@ -5,7 +5,7 @@
 
 set -e
 
-NUM_SIMULATIONS=1
+NUM_SIMULATIONS=5
 PACKAGE_NAME="simulation_rmp_1"
 LAUNCH_FILE="simulation_rmp_launch.py"
 
@@ -29,7 +29,7 @@ do
     export RUN_DIR="$RUN_DIR"
     
     # Launch the ROS2 simulation
-    ros2 launch "$PACKAGE_NAME" "$LAUNCH_FILE"
+    timeout 60s ros2 launch "$PACKAGE_NAME" "$LAUNCH_FILE"
 
     echo
     echo "=== Simulation $i finished. Restarting Gazebo & RViz for next simulation ==="
