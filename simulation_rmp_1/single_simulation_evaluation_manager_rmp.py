@@ -14,10 +14,10 @@ from geometry_msgs.msg import PoseStamped
 # Edit these variables to specify which simulation to recreate:
 
 # JSON file configuration
-JSON_FILE_PATH = "/home/matteo/Simulation_rmp/Run_20250815_150643/evaluation_results_with_distances.json"  # Path to the JSON file with simulation data
+JSON_FILE_PATH = "/home/matteo/Simulation_rmp/Run_20250819_111316/evaluation_results_with_distances.json"  # Path to the JSON file with simulation data
 
 # Simulation number to recreate
-SIMULATION_NUMBER = 1  # Change this to the simulation you want to recreate
+SIMULATION_NUMBER = 5  # Change this to the simulation you want to recreate
 
 # =============================================================
 

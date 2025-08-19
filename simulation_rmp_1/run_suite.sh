@@ -5,7 +5,7 @@
 
 set -e
 
-NUM_SIMULATIONS=5
+NUM_SIMULATIONS=10
 PACKAGE_NAME="simulation_rmp_1"
 LAUNCH_FILE="simulation_rmp_launch.py"
 
