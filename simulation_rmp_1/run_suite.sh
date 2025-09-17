@@ -3,9 +3,9 @@
 # Exit immediately if a command exits with a non-zero status.
 #exec franka_ros2_ws/src/simulation_rmp_1/simulation_rmp_1/run_suite.sh
 
-set -e
+# set -e
 
-NUM_SIMULATIONS=10
+NUM_SIMULATIONS=5
 PACKAGE_NAME="simulation_rmp_1"
 LAUNCH_FILE="simulation_rmp_launch.py"
 

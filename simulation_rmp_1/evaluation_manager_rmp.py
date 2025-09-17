@@ -10,14 +10,15 @@ import time
 import json
 import numpy as np
 from datetime import datetime
-from messages_fr3.msg import ClosestPoint  # Import your custom message type
+from messages_fr3.msg import ClosestPoint 
 from geometry_msgs.msg import PoseStamped
 import threading
 
-# >>> NEW IMPORTS <<<
+
 from moveit_msgs.srv import GetStateValidity, ApplyPlanningScene
 from moveit_msgs.msg import RobotState
 from sensor_msgs.msg import JointState
+from visualization_msgs.msg import Marker  #Add this import for the target marker
 
 
 class EvaluationManager(Node):
@@ -25,6 +26,9 @@ class EvaluationManager(Node):
         super().__init__('evaluation_manager')
         self.pose_pub = self.create_publisher(Pose, '/riemannian_motion_policy/reference_pose', 10)
         self.planning_scene_pub = self.create_publisher(PlanningScene, '/planning_scene', 10)
+
+            # Add marker publisher for target visualization
+        self.target_marker_pub = self.create_publisher(Marker, '/target_marker', 10)
         
         # MoveIt planning scene service client for scene/state retrieval
         self.planning_scene_client = self.create_client(GetPlanningScene, '/get_planning_scene')
@@ -64,6 +68,15 @@ class EvaluationManager(Node):
             10
         )
         self.current_ee_pose = None
+        
+        # NEW: Subscribe to joint states for velocity logging
+        self.joint_state_sub = self.create_subscription(
+            JointState,
+            '/joint_states',
+            self.joint_state_callback,
+            10
+        )
+        self.current_joint_state = None
         
         self.workspace_bounds = {'x': (0.2, 0.8), 'y': (-0.5, 0.5), 'z': (0.2, 0.8)}
         
@@ -150,6 +163,11 @@ class EvaluationManager(Node):
         with self.distance_data_lock:
             self.latest_distance_msg = msg
 
+    def joint_state_callback(self, msg):
+        """Store the latest joint state data"""
+        with self.distance_data_lock:
+            self.current_joint_state = msg
+
     def calculate_curvature_between_points(self, p1, p2, p3):
         """
         Calculate curvature at point p2 given three consecutive points p1, p2, p3.
@@ -178,6 +196,12 @@ class EvaluationManager(Node):
         relative_time = current_time - self.simulation_start_time if self.simulation_start_time else 0
         
         current_ee_pos = self.get_end_effector_position()
+
+     # Calculate distance to target
+        distance_to_target = None
+        if current_ee_pos is not None and hasattr(self, 'target_position'):
+            distance_to_target = float(np.linalg.norm(current_ee_pos - self.target_position))
+        
         if current_ee_pos is not None:
             if self.start_ee_position is None:
                 self.start_ee_position = current_ee_pos.copy()
@@ -197,6 +221,14 @@ class EvaluationManager(Node):
             self.previous_ee_position = current_ee_pos.copy()
             self.path_positions.append(current_ee_pos.copy())
             self.end_ee_position = current_ee_pos.copy()
+        
+        #Get joint velocities
+        joint_velocities = None
+        joint_names = None
+        with self.distance_data_lock:
+            if self.current_joint_state is not None:
+                joint_names = list(self.current_joint_state.name)
+                joint_velocities = list(self.current_joint_state.velocity)
         
         with self.distance_data_lock:
             msg = self.latest_distance_msg
@@ -236,7 +268,10 @@ class EvaluationManager(Node):
             'overall_min_distance': overall_min,
             'link_distances': min_distances,
             'num_obstacles_detected': num_obstacles_detected,
-            'end_effector_position': current_ee_pos.tolist() if current_ee_pos is not None else None
+            'end_effector_position': current_ee_pos.tolist() if current_ee_pos is not None else None,
+            'distance_to_target': distance_to_target, 
+            'joint_names': joint_names,
+            'joint_velocities': joint_velocities
         }
         self.distance_data.append(distance_entry)
         if overall_min < 0.1:
@@ -245,6 +280,61 @@ class EvaluationManager(Node):
             self.get_logger().info(f"Reached maximum samples ({self.max_samples}), stopping regular sampling")
             if self.sampling_timer:
                 self.sampling_timer.cancel()
+
+    def calculate_joint_velocity_metrics(self):
+        """Calculate joint velocity statistics"""
+        if not self.distance_data:
+            return {'error': 'No distance data collected'}
+        
+        # Collect all joint velocity data
+        all_joint_velocities = []
+        joint_names = None
+        timestamps = []
+        
+        for entry in self.distance_data:
+            if entry.get('joint_velocities') is not None and entry.get('joint_names') is not None:
+                if joint_names is None:
+                    joint_names = entry['joint_names']
+                all_joint_velocities.append(entry['joint_velocities'])
+        
+        if not all_joint_velocities:
+            return {'error': 'No joint velocity data collected'}
+        
+        velocities_array = np.array(all_joint_velocities)  # Shape: (num_samples, num_joints)
+        
+        metrics = {
+            'joint_names': joint_names,
+            'num_samples': len(all_joint_velocities),
+            'timestamps': timestamps,  # Include timestamps for each sample
+            'raw_velocity_data': all_joint_velocities,  # NEW: Include all raw velocity data
+            'per_joint_metrics': {},
+            'per_joint_raw_data': {}  # Per-joint raw data for easier access
+        }
+        
+        # Calculate metrics for each joint
+        for i, joint_name in enumerate(joint_names):
+            joint_vels = velocities_array[:, i]
+            joint_vels_list = joint_vels.tolist()  # Convert to list for JSON serialization
+            
+            metrics['per_joint_metrics'][joint_name] = {
+                'max_velocity': float(np.max(np.abs(joint_vels))),
+                'avg_abs_velocity': float(np.mean(np.abs(joint_vels))),
+                'std_velocity': float(np.std(joint_vels)),
+                'max_positive': float(np.max(joint_vels)),
+                'max_negative': float(np.min(joint_vels))
+            }
+            
+            # NEW: Store raw velocity data for each joint
+            metrics['per_joint_raw_data'][joint_name] = {
+                'velocities': joint_vels_list,
+                'timestamps': timestamps
+            }
+        
+        # Overall metrics
+        metrics['overall_max_velocity'] = float(np.max(np.abs(velocities_array)))
+        metrics['overall_avg_velocity'] = float(np.mean(np.abs(velocities_array)))
+        
+        return metrics
 
     def wait_for_dependencies(self):
         self.get_logger().info("Waiting for dependencies...")
@@ -457,6 +547,115 @@ class EvaluationManager(Node):
             # Fail safe
             return True
 
+    def check_target_sphere_collision_with_moveit(self, obstacle_pose, height, radius, orientation_type, target_position, target_clearance=0.13):
+    # """
+    # Check if an obstacle would collide with a sphere around the target position.
+    # Returns True if collision is detected (obstacle too close to target).
+    
+    # Args:
+    #     obstacle_pose: Pose of the obstacle cylinder
+    #     height, radius: Cylinder dimensions
+    #     orientation_type: Orientation of the cylinder
+    #     target_position: numpy array [x, y, z] of target position
+    #     target_clearance: radius of sphere around target (default 13cm)
+    
+    # Returns:
+    #     bool: True if obstacle is too close to target (collision detected)
+    # """
+        try:
+            # Create unique IDs to avoid clashes with existing objects
+            obstacle_id = f"temp_target_check_obstacle_{int(time.time()*1e6)}"
+            sphere_id = f"temp_target_check_sphere_{int(time.time()*1e6)}"
+
+            # Step 1: Create the obstacle cylinder
+            obstacle_obj = CollisionObject()
+            obstacle_obj.header.frame_id = "fr3_link0"
+            obstacle_obj.header.stamp = self.get_clock().now().to_msg()
+            obstacle_obj.id = obstacle_id
+
+            cylinder = SolidPrimitive()
+            cylinder.type = SolidPrimitive.CYLINDER
+            cylinder.dimensions = [height, radius]  # [HEIGHT, RADIUS]
+            obstacle_obj.primitives.append(cylinder)
+            obstacle_obj.primitive_poses.append(obstacle_pose)
+            obstacle_obj.operation = CollisionObject.ADD
+
+            # Step 2: Create sphere around target position
+            sphere_obj = CollisionObject()
+            sphere_obj.header.frame_id = "fr3_link0"
+            sphere_obj.header.stamp = self.get_clock().now().to_msg()
+            sphere_obj.id = sphere_id
+
+            sphere = SolidPrimitive()
+            sphere.type = SolidPrimitive.SPHERE
+            sphere.dimensions = [target_clearance]  # Only radius needed for sphere
+            sphere_obj.primitives.append(sphere)
+            
+            # Create pose for sphere at target position
+            sphere_pose = Pose()
+            sphere_pose.position.x = target_position[0]
+            sphere_pose.position.y = target_position[1]
+            sphere_pose.position.z = target_position[2]
+            sphere_pose.orientation.w = 1.0  # No rotation needed for sphere
+            sphere_obj.primitive_poses.append(sphere_pose)
+            sphere_obj.operation = CollisionObject.ADD
+
+            # Step 3: Apply both objects to planning scene
+            scene_diff = PlanningScene()
+            scene_diff.is_diff = True
+            scene_diff.world.collision_objects.append(obstacle_obj)
+            scene_diff.world.collision_objects.append(sphere_obj)
+
+            if not self._apply_scene(scene_diff):
+                self.get_logger().warn("Failed to apply scene for target sphere collision check")
+                return True  # Fail safe: treat as collision so we retry
+
+            # Step 4: Small delay to ensure scene is properly updated
+            rclpy.spin_once(self, timeout_sec=0.05)
+
+            # Step 5: Calculate geometric overlap (simplified collision detection)
+            obstacle_pos = np.array([obstacle_pose.position.x, obstacle_pose.position.y, obstacle_pose.position.z])
+            center_distance = np.linalg.norm(obstacle_pos - target_position)
+            
+            # Calculate minimum distance from cylinder surface to sphere surface
+            if orientation_type == 'vertical':
+                # Cylinder axis along Z
+                height_diff = abs(obstacle_pose.position.z - target_position[2])
+                radial_distance = np.sqrt((obstacle_pose.position.x - target_position[0])**2 + 
+                                        (obstacle_pose.position.y - target_position[1])**2)
+                
+                if height_diff <= height/2:
+                    # Target is within cylinder height range
+                    surface_distance = max(0, radial_distance - radius)
+                else:
+                    # Target is above/below cylinder
+                    edge_height_distance = height_diff - height/2
+                    if radial_distance <= radius:
+                        surface_distance = edge_height_distance
+                    else:
+                        surface_distance = np.sqrt(edge_height_distance**2 + (radial_distance - radius)**2)
+            else:
+                # For horizontal cylinders, use simplified calculation
+                surface_distance = max(0, center_distance - radius)
+            
+            # Collision detected if surface distance is less than target clearance
+            collision_detected = surface_distance < target_clearance
+
+            # Step 6: IMPORTANT - Clean up both temporary objects immediately
+            obstacle_obj.operation = CollisionObject.REMOVE
+            sphere_obj.operation = CollisionObject.REMOVE
+            scene_remove = PlanningScene()
+            scene_remove.is_diff = True
+            scene_remove.world.collision_objects.append(obstacle_obj)
+            scene_remove.world.collision_objects.append(sphere_obj)
+            self._apply_scene(scene_remove)
+
+            return collision_detected
+
+        except Exception as e:
+            self.get_logger().error(f"Error in target sphere collision checking: {e}")
+            return True  # Fail safe: treat as collision
+
     def generate_random_orientation(self):
         """Generate random orientation for cylinder"""
         orientation_type = random.choice(['vertical', 'horizontal_x', 'horizontal_y'])
@@ -484,13 +683,22 @@ class EvaluationManager(Node):
     def generate_multiple_obstacle_poses_with_moveit_collision_check(self):
         """
         Generate multiple obstacle poses using MoveIt collision checking.
+        Now also ensures obstacles are at least 13cm away from target pose using sphere collision detection.
         """
         obstacle_poses = []
         self.obstacle_info = []
         max_attempts_per_obstacle = 100
+        min_distance_to_target = 0.13  # 13cm minimum distance to target
         
         self.get_logger().info("Using MoveIt collision checking for obstacle placement...")
         
+        # STEP 1: Generate target position early for distance checking
+        target = self.sample_valid_target_directly([])  # Empty list since no obstacles exist yet
+        target_position = np.array([target.position.x, target.position.y, target.position.z])
+        self.get_logger().info(f"Target position for obstacle distance checking: [{target_position[0]:.3f}, {target_position[1]:.3f}, {target_position[2]:.3f}]")
+        self.get_logger().info(f"Will check {min_distance_to_target*100:.0f}cm clearance around target using MoveIt sphere collision detection")
+        
+        # STEP 2: Generate obstacles with both robot collision and target distance checking
         for cylinder_idx in range(self.num_cylinders):
             self.get_logger().info(f"Generating obstacle {cylinder_idx + 1}/{self.num_cylinders}...")
             placed = False
@@ -502,7 +710,7 @@ class EvaluationManager(Node):
                 orientation, orientation_type = self.generate_random_orientation()
                 temp_pose.orientation = orientation
 
-                # >>> CHANGED: use Gaussian sampler (fallback to uniform inside the function)
+                # Generate position
                 if self.use_gaussian_sampling:
                     x, y, z = self.sample_valid_position_gaussian()
                 else:
@@ -512,11 +720,22 @@ class EvaluationManager(Node):
                 temp_pose.position.y = y
                 temp_pose.position.z = z
                 
-                collision_detected = self.check_obstacle_collision_with_moveit(
+                # STEP 3: Check if obstacle is too close to target using sphere collision
+                target_collision_detected = self.check_target_sphere_collision_with_moveit(
+                    temp_pose, height, radius, orientation_type, target_position, min_distance_to_target
+                )
+                
+                if target_collision_detected:
+                    if attempts % 20 == 0:
+                        self.get_logger().debug(f"  Attempt {attempts}: Too close to target (sphere collision detected), retrying...")
+                    continue
+                
+                # STEP 4: Check robot collision (existing check)
+                robot_collision_detected = self.check_obstacle_collision_with_moveit(
                     temp_pose, height, radius, orientation_type
                 )
                 
-                if not collision_detected:
+                if not robot_collision_detected:
                     obstacle_poses.append(temp_pose)
                     self.obstacle_info.append({
                         'pose': temp_pose,
@@ -527,17 +746,24 @@ class EvaluationManager(Node):
                     orientation_str = orientation_type.replace('_', ' ')
                     self.get_logger().info(f"  ✓ Obstacle {cylinder_idx + 1} placed at [{x:.3f}, {y:.3f}, {z:.3f}] ({orientation_str})")
                     self.get_logger().info(f"    Size: height={height:.3f}m, radius={radius:.3f}m")
-                    self.get_logger().info(f"    Attempts needed: {attempts} (MoveIt collision check)")
+                    self.get_logger().info(f"    Target clearance: OK (>= {min_distance_to_target:.3f}m via MoveIt sphere check)")
+                    self.get_logger().info(f"    Attempts needed: {attempts}")
                     placed = True
                 else:
                     if attempts % 20 == 0:
-                        self.get_logger().debug(f"  Attempt {attempts}: MoveIt detected collision, retrying...")
+                        self.get_logger().debug(f"  Attempt {attempts}: MoveIt detected robot collision, retrying...")
+                        
             if not placed:
                 self.get_logger().error(f"Failed to place obstacle {cylinder_idx + 1} after {max_attempts_per_obstacle} attempts")
-                self.get_logger().error("Consider adjusting constraints or cylinder sizes")
+                self.get_logger().error("Consider adjusting constraints, cylinder sizes, or target distance requirement")
                 continue
         
-        self.get_logger().info(f"Successfully placed {len(obstacle_poses)}/{self.num_cylinders} obstacles using MoveIt collision checking")
+        self.get_logger().info(f"Successfully placed {len(obstacle_poses)}/{self.num_cylinders} obstacles")
+        self.get_logger().info("All obstacles respect 13cm clearance from target pose (verified via MoveIt sphere collision)")
+        
+        # STEP 5: Store the target for later use in simulation
+        self.precomputed_target = target
+        
         return obstacle_poses
 
     def sample_valid_target_directly(self, obstacle_poses):
@@ -705,6 +931,41 @@ class EvaluationManager(Node):
             self.pose_pub.publish(pose)
             time.sleep(0.1)
 
+    def publish_target_marker(self, target_pose):
+        """Publish a red sphere marker at the target position for RViz visualization"""
+        marker = Marker()
+        
+        # Header information
+        marker.header.frame_id = "fr3_link0"  # Same frame as your robot
+        marker.header.stamp = self.get_clock().now().to_msg()
+        
+        # Marker properties
+        marker.ns = "target_pose"  # Namespace
+        marker.id = 0  # Unique ID
+        marker.type = Marker.SPHERE  # Sphere shape
+        marker.action = Marker.ADD  # Add/update the marker
+        
+        # Position (from target pose)
+        marker.pose.position.x = target_pose.position.x
+        marker.pose.position.y = target_pose.position.y
+        marker.pose.position.z = target_pose.position.z
+        marker.pose.orientation.w = 1.0  # No rotation needed for sphere
+        
+        # Size of the sphere (diameter in meters)
+        marker.scale.x = 0.05  # 5cm diameter
+        marker.scale.y = 0.05
+        marker.scale.z = 0.05
+        
+        # Color (red sphere)
+        marker.color.r = 1.0  # Full red
+        marker.color.g = 0.0  # No green
+        marker.color.b = 0.0  # No blue
+        marker.color.a = 0.8  # 80% opacity (slightly transparent)
+        
+        # Publish the marker
+        self.target_marker_pub.publish(marker)
+        self.get_logger().info(f"Published target marker at [{target_pose.position.x:.3f}, {target_pose.position.y:.3f}, {target_pose.position.z:.3f}]")
+
     def start_recording(self):
         """Start recording distance data with regular sampling"""
         self.distance_data = []
@@ -762,7 +1023,7 @@ class EvaluationManager(Node):
             time.sleep(0.5)
             return True
         else:
-            self.get_logger().warn(f"⚠ Timeout waiting for obstacle detection after {timeout}s")
+            self.get_logger().warn(f" Timeout waiting for obstacle detection after {timeout}s")
             self.get_logger().warn("  Continuing anyway - obstacles may not be properly loaded")
             return False
 
@@ -828,7 +1089,16 @@ class EvaluationManager(Node):
         if not is_safe:
             self.get_logger().warn("Initial collision detected but continuing (this should be rare with MoveIt collision checking)")
         
-        target = self.sample_valid_target_directly(obstacles)
+        # STEP 3: Use the precomputed target (no sphere around it anymore)
+        if hasattr(self, 'precomputed_target'):
+            target = self.precomputed_target
+            self.get_logger().info("Using precomputed target that respects 13cm clearance from all obstacles")
+            self.get_logger().info("Target sphere was used only for obstacle placement and has been removed")
+        else:
+            # Fallback to old method if something went wrong
+            target = self.sample_valid_target_directly(obstacles)
+            self.get_logger().warn("Fallback: using newly sampled target")
+
         time.sleep(2.0)
         
         self.target_position = np.array([target.position.x, target.position.y, target.position.z])
@@ -837,9 +1107,16 @@ class EvaluationManager(Node):
         self.goal_reach_time = None
         self.position_check_count = 0
         self.successful_position_checks = 0
+
+        self.set_target_pose(target)
+        #Publish target marker for RViz visualization
+        self.publish_target_marker(target)
+
+        self.get_logger().info(f"Target position: [{target.position.x:.3f}, {target.position.y:.3f}, {target.position.z:.3f}]")
         
         self.set_target_pose(target)
         self.get_logger().info(f"Target position: [{target.position.x:.3f}, {target.position.y:.3f}, {target.position.z:.3f}]")
+        self.get_logger().info("Robot can now freely approach target - no collision sphere around target")
         self.get_logger().info("Waiting briefly for robot state updates...")
         time.sleep(1.0)
         self.start_recording()
@@ -868,6 +1145,7 @@ class EvaluationManager(Node):
         self.stop_recording()
         path_metrics = self.calculate_path_metrics()
         analysis = self.analyze_distance_data()
+        joint_velocity_metrics = self.calculate_joint_velocity_metrics()
         obstacle_positions = [[obs.position.x, obs.position.y, obs.position.z] for obs in obstacles]
         obstacle_sizes = []
         for obs_info in self.obstacle_info:
@@ -896,7 +1174,8 @@ class EvaluationManager(Node):
             'total_samples_collected': len(self.distance_data),
             'max_samples_configured': self.max_samples,
             'obstacles_properly_loaded': obstacles_ready,
-            'path_metrics': path_metrics
+            'path_metrics': path_metrics,
+            'joint_velocity_analysis': joint_velocity_metrics
         }
         return result
 
@@ -978,6 +1257,22 @@ class EvaluationManager(Node):
                 self.get_logger().info(f"  Curvature points calculated: {path_metrics.get('num_curvature_points', 0)}")
         else:
             self.get_logger().warn("Path metrics not available - end-effector position tracking failed")
+        
+        # NEW: Joint velocity summary logging
+        if 'joint_velocity_analysis' in result and 'per_joint_metrics' in result['joint_velocity_analysis']:
+            joint_metrics = result['joint_velocity_analysis']
+            self.get_logger().info(f"Joint Velocity Summary:")
+            self.get_logger().info(f"  Overall max velocity: {joint_metrics.get('overall_max_velocity', 'N/A'):.3f} rad/s")
+            self.get_logger().info(f"  Overall avg velocity: {joint_metrics.get('overall_avg_velocity', 'N/A'):.3f} rad/s")
+            self.get_logger().info(f"  Samples collected: {joint_metrics.get('num_samples', 'N/A')}")
+            
+            for joint_name, metrics in joint_metrics['per_joint_metrics'].items():
+                self.get_logger().info(f"  {joint_name}:")
+                self.get_logger().info(f"    Max |velocity|: {metrics['max_velocity']:.3f} rad/s")
+                self.get_logger().info(f"    Avg |velocity|: {metrics['avg_abs_velocity']:.3f} rad/s")
+        else:
+            self.get_logger().warn("Joint velocity metrics not available")
+        
         self.get_logger().info(f"Obstacle Summary:")
         self.get_logger().info(f"  Number of obstacles: {result.get('num_obstacles', 'N/A')}")
         self.get_logger().info(f"  MoveIt collision checking used: {result.get('moveit_collision_checking_used', False)}")

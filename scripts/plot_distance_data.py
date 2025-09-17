@@ -13,7 +13,7 @@ CONFIGURATION - Edit these variables at the top:
 # ==================== MANUAL CONFIGURATION ====================
 # Edit these variables to specify which data to plot:
 
-RUN_FOLDER_NAME = "Run_20250818_103405"  # Name of the run folder (e.g., "Run_20250808_143022")
+RUN_FOLDER_NAME = "Run_20250917_132850"  # Name of the run folder (e.g., "Run_20250808_143022")
 JSON_FILENAME = "evaluation_results_with_distances.json"  # Name of the JSON file
 
 # Specify which simulations to plot:
