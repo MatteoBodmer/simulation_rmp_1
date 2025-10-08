@@ -6,22 +6,19 @@ from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
 from launch.actions import (
-    DeclareLaunchArgument, ExecuteProcess, OpaqueFunction,
-    IncludeLaunchDescription, RegisterEventHandler, TimerAction
+    DeclareLaunchArgument, OpaqueFunction, IncludeLaunchDescription,
+    RegisterEventHandler, Shutdown, AppendEnvironmentVariable, ExecuteProcess, TimerAction
 )
-from launch.event_handlers import OnProcessExit
+from launch.event_handlers import OnProcessExit, OnProcessStart, OnShutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, Command, FindExecutable
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
-from launch.actions import RegisterEventHandler, Shutdown
-from launch.event_handlers import OnProcessExit
 
 
 def load_yaml(package_name, file_path):
     package_path = get_package_share_directory(package_name)
     absolute_file_path = os.path.join(package_path, file_path)
-
     try:
         with open(absolute_file_path, 'r') as file:
             return yaml.safe_load(file)
@@ -59,7 +56,7 @@ def get_robot_description(context, arm_id, load_gripper, franka_hand):
         executable='robot_state_publisher',
         name='robot_state_publisher',
         output='screen',
-        parameters=[robot_description],
+        parameters=[robot_description, {'use_sim_time': LaunchConfiguration('use_sim_time')}],
         remappings=[('joint_states', '/gazebo/joint_states')],
     )
 
@@ -67,7 +64,7 @@ def get_robot_description(context, arm_id, load_gripper, franka_hand):
 
 
 def generate_launch_description():
-    # Common arguments
+    # --- Common arguments
     load_gripper_arg = DeclareLaunchArgument('load_gripper', default_value='true')
     franka_hand_arg = DeclareLaunchArgument('franka_hand', default_value='franka_hand')
     arm_id_arg = DeclareLaunchArgument('arm_id', default_value='fr3')
@@ -75,70 +72,72 @@ def generate_launch_description():
     use_fake_hw_arg = DeclareLaunchArgument('use_fake_hardware', default_value='true')
     fake_sensor_cmd_arg = DeclareLaunchArgument('fake_sensor_commands', default_value='true')
     db_arg = DeclareLaunchArgument('db', default_value='False')
+    use_sim_time_arg = DeclareLaunchArgument('use_sim_time', default_value='true')
 
-    # Launch configurations
+    # --- Launch configurations
     load_gripper = LaunchConfiguration('load_gripper')
     franka_hand = LaunchConfiguration('franka_hand')
     arm_id = LaunchConfiguration('arm_id')
-    robot_ip = LaunchConfiguration('robot_ip')
-    use_fake_hw = LaunchConfiguration('use_fake_hardware')
-    fake_sensor_cmd = LaunchConfiguration('fake_sensor_commands')
+    use_sim_time = LaunchConfiguration('use_sim_time')
 
-    # === RMP & Gazebo ===
-    os.environ['GZ_SIM_RESOURCE_PATH'] = os.path.dirname(get_package_share_directory('franka_description'))
+    # --- Gazebo (GUI on)
+    set_gz_resources = AppendEnvironmentVariable(
+        'GZ_SIM_RESOURCE_PATH',
+        os.path.join(get_package_share_directory('franka_description'))
+    )
+
     pkg_ros_gz_sim = get_package_share_directory('ros_gz_sim')
-
-    # Run Gazebo headless for faster execution
     gazebo_world = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(pkg_ros_gz_sim, 'launch', 'gz_sim.launch.py')),
-        launch_arguments={'gz_args': 'empty.sdf -r'}.items(),  # Added -s for headless
+        launch_arguments={'gz_args': 'empty.sdf -r'}.items(),
     )
 
+    # --- Robot description & publisher
     robot_state_publisher = OpaqueFunction(
         function=get_robot_description,
         args=[arm_id, load_gripper, franka_hand]
     )
 
+    # --- Spawn robot entity into Gazebo
     spawn_robot = Node(
         package='ros_gz_sim',
         executable='create',
         arguments=['-topic', '/robot_description'],
         output='screen',
+        parameters=[{'use_sim_time': use_sim_time}],
     )
 
-    # Remove the static obstacle spawn - we'll spawn dynamically
-    
-    load_joint_state_broadcaster = ExecuteProcess(
-        cmd=['ros2', 'control', 'load_controller', '--set-state', 'active', 'joint_state_broadcaster'],
-        output='screen'
+    # --- Controller spawners (generous CM timeout)
+    jsb_spawner = Node(
+        package='controller_manager',
+        executable='spawner',
+        arguments=[
+            'joint_state_broadcaster',
+            '--controller-manager', '/controller_manager',
+            '--controller-manager-timeout', '30'
+        ],
+        output='screen',
     )
 
-    # Add this after the riemannian_motion_policy controller loading
-    # franka_robot_state_broadcaster = ExecuteProcess(
-    #     cmd=['ros2', 'control', 'load_controller', '--set-state', 'active', 'franka_robot_state_broadcaster'],
-    #     output='screen'
-    # )
-
-    riemannian_motion_policy = ExecuteProcess(
-        cmd=['ros2', 'control', 'load_controller', '--set-state', 'active', 'riemannian_motion_policy'],
-        output='screen'
+    rmp_spawner = Node(
+        package='controller_manager',
+        executable='spawner',
+        arguments=[
+            'riemannian_motion_policy',
+            '--controller-manager', '/controller_manager',
+            '--controller-manager-timeout', '30'
+        ],
+        output='screen',
     )
 
+    # --- set_load.sh (run in PARALLEL, non-blocking)
     set_load = ExecuteProcess(
         cmd=['/home/matteo/franka_ros2_ws/src/Riemannian-Motion-Policies-Franka-Emika-Robot/launch/set_load.sh'],
         output='screen',
     )
 
-    start_controller = Node(
-        package='controller_manager',
-        executable='spawner',
-        arguments=['riemannian_motion_policy'],
-        output='screen',
-    )
-
-    # === MoveIt (without RViz for headless operation) ===
-
+    # --- MoveIt
     franka_semantic_xacro_file = os.path.join(
         get_package_share_directory('franka_fr3_moveit_config'),
         'srdf', 'fr3_arm.srdf.xacro')
@@ -191,26 +190,12 @@ def generate_launch_description():
         'monitor_octomap': False,
     }
 
-    # run_move_group_node = Node(
-    #     package='moveit_ros_move_group',
-    #     executable='move_group',
-    #     output='screen',
-    #     parameters=[
-    #         robot_description_semantic,
-    #         kinematics_yaml,
-    #         ompl_planning_pipeline_config,
-    #         trajectory_execution,
-    #         moveit_controllers,
-    #         planning_scene_monitor_parameters,
-    #     ],
-    # )
-
-    # Add RViz node around line 150 (after run_move_group_node):
-    run_move_group_node = Node(
+    move_group = Node(
         package='moveit_ros_move_group',
         executable='move_group',
         output='screen',
         parameters=[
+            {'use_sim_time': use_sim_time},
             robot_description_semantic,
             kinematics_yaml,
             ompl_planning_pipeline_config,
@@ -220,7 +205,7 @@ def generate_launch_description():
         ],
     )
 
-    # Add this RViz node:
+    # --- RViz (kept)
     rviz_config = os.path.join(
         get_package_share_directory('franka_fr3_moveit_config'),
         'rviz', 'moveit.rviz')
@@ -232,21 +217,30 @@ def generate_launch_description():
         output='log',
         arguments=['-d', rviz_config],
         parameters=[
+            {'use_sim_time': use_sim_time},
             robot_description_semantic,
             kinematics_yaml,
             ompl_planning_pipeline_config,
         ],
     )
 
-    # Evaluation Manager Node
+    # --- Distance Calculator
+    distance_calculator = Node(
+        package='motion_planning_mt',
+        executable='distance_calculator',
+        name='distance_calculator',
+        output='screen',
+        parameters=[{'use_sim_time': use_sim_time}]
+    )
+
+    # --- Evaluation Manager
     evaluation_manager = Node(
-        package='simulation_rmp_1',  # Adjust package name if different
+        package='simulation_rmp_1',
         executable='evaluation_manager_rmp',
         name='evaluation_manager',
         output='screen',
+        parameters=[{'use_sim_time': use_sim_time}],
     )
-
-
 
     shutdown_on_exit = RegisterEventHandler(
         OnProcessExit(
@@ -255,109 +249,69 @@ def generate_launch_description():
         )
     )
 
-    # === Scene Node (for populating environment) ===
-    # scene_node = Node(
-    #     package='motion_planning_mt',  # Adjust if package name is different  
-    #     executable='cylinder_scene',
-    #     name='cylinder_scene',
-    #     output='screen',
-    # )
-
-
-    # === Distance Calculator Node (Required for RMP) ===
-    distance_calculator = Node(
-        package='motion_planning_mt',  # Your package containing distance_calculator.cpp
-        executable='distance_calculator',
-        name='distance_calculator',
-        output='screen',
-        parameters=[{
-            'use_sim_time': True,  # Add this for Gazebo simulation
-        }]
+    # NEW: force-close GUI bits when shutting down (prevents GPU/GUI leaks across runs)
+    kill_gui_on_shutdown = RegisterEventHandler(
+        OnShutdown(
+            on_shutdown=[
+                ExecuteProcess(cmd=['pkill', '-f', 'ign gazebo'], output='screen'),
+                ExecuteProcess(cmd=['pkill', '-f', 'gz sim'], output='screen'),
+                ExecuteProcess(cmd=['pkill', '-f', 'rviz2'], output='screen'),
+            ]
+        )
     )
 
-    # === Evaluation Manager Node (with delay to ensure everything is ready) ===
-    # evaluation_manager = TimerAction(
-    #     period=15.0,  # Wait 10 seconds for all services to be ready
-    #     actions=[
-    #         Node(
-    #             package='simulation_rmp',
-    #             executable='evaluation_manager_rmp',
-    #             name='evaluation_manager',
-    #             output='screen',
-    #         )
-    #     ]
-    # )
+    # --- Readiness chaining
+    # spawn -> small delay -> JSB spawner (set_load left out to avoid blocking)
+    chain_spawn_to_delay = RegisterEventHandler(
+        OnProcessExit(target_action=spawn_robot, on_exit=TimerAction(period=3.0, actions=[jsb_spawner]))
+    )
 
-    # === Final LaunchDescription ===
+    # JSB -> RMP
+    chain_jsb_to_rmp = RegisterEventHandler(
+        OnProcessExit(target_action=jsb_spawner, on_exit=[rmp_spawner])
+    )
+
+    # RMP -> start move_group (long-running)
+    chain_rmp_to_move_group = RegisterEventHandler(
+        OnProcessExit(target_action=rmp_spawner, on_exit=[move_group])
+    )
+
+    # Start distance_calculator when move_group STARTS (not when it exits)
+    start_distance_after_move_group_starts = RegisterEventHandler(
+        OnProcessStart(target_action=move_group, on_start=[TimerAction(period=1.0, actions=[distance_calculator])])
+    )
+
+    # Start evaluation_manager when distance_calculator STARTS
+    start_eval_after_distance_starts = RegisterEventHandler(
+        OnProcessStart(target_action=distance_calculator, on_start=[TimerAction(period=1.0, actions=[evaluation_manager])])
+    )
 
     return LaunchDescription([
+        # Args
         load_gripper_arg, franka_hand_arg, arm_id_arg,
         robot_ip_arg, use_fake_hw_arg, fake_sensor_cmd_arg, db_arg,
+        use_sim_time_arg,
 
+        # Gazebo + env path
+        set_gz_resources,
         gazebo_world,
+
+        # Robot description + spawn
         robot_state_publisher,
         spawn_robot,
 
-        RegisterEventHandler(
-            OnProcessExit(
-                target_action=spawn_robot,
-                on_exit=[load_joint_state_broadcaster],
-            )
-        ),
-        RegisterEventHandler(
-            OnProcessExit(
-                target_action=load_joint_state_broadcaster,
-                on_exit=[riemannian_motion_policy],
-            )
-        ),
+        # Chain (spawners), then start long-running nodes via OnProcessStart
+        chain_spawn_to_delay,
+        chain_jsb_to_rmp,
+        chain_rmp_to_move_group,
+        start_distance_after_move_group_starts,
+        start_eval_after_distance_starts,
 
-        # RegisterEventHandler(
-        #     OnProcessExit(
-        #         target_action=load_joint_state_broadcaster,
-        #         on_exit=[franka_robot_state_broadcaster],  # Add this line
-        #     )
-        # ),
-        # RegisterEventHandler(
-        #     OnProcessExit(
-        #         target_action=franka_robot_state_broadcaster,  # And update this
-        #         on_exit=[riemannian_motion_policy],
-        #     )
-        # ),
-
-        set_load,
-        RegisterEventHandler(
-            OnProcessExit(
-                target_action=set_load,
-                on_exit=[start_controller],
-            )
-        ),
-
-
-        # MoveIt
-        run_move_group_node,
+        # Visualization
         rviz_node,
-        distance_calculator,
-        # evaluation_manager,
-        # Start distance calculator after move_group is ready
-        # RegisterEventHandler(
-        #     OnProcessExit(
-        #         target_action=run_move_group_node,
-        #         on_exit=[distance_calculator],
-        #     )
-        # ),
 
-            # Start evaluation_manager after delay
-        TimerAction(
-            period=10.0,
-            actions=[evaluation_manager]
-        ),
-        shutdown_on_exit
+        # Clean shutdown once evaluation ends
+        shutdown_on_exit,
+        kill_gui_on_shutdown,  # <-- added
     ])
-        
-
-
-
-
-
-
         

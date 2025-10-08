@@ -13,17 +13,24 @@ from datetime import datetime
 from messages_fr3.msg import ClosestPoint 
 from geometry_msgs.msg import PoseStamped
 import threading
-
+from rclpy.parameter import Parameter 
 
 from moveit_msgs.srv import GetStateValidity, ApplyPlanningScene
 from moveit_msgs.msg import RobotState
 from sensor_msgs.msg import JointState
-from visualization_msgs.msg import Marker  #Add this import for the target marker
+from visualization_msgs.msg import Marker 
+
+from rclpy.clock import Clock, ClockType
+from rclpy.parameter import Parameter
 
 
 class EvaluationManager(Node):
     def __init__(self):
         super().__init__('evaluation_manager')
+        # Use wall time for this node so timers always run
+        self.set_parameters([Parameter('use_sim_time', value=False)])
+        self.get_logger().info("EvaluationManager will use wall time (use_sim_time:=false) so sampling timers always tick.")
+
         self.pose_pub = self.create_publisher(Pose, '/riemannian_motion_policy/reference_pose', 10)
         self.planning_scene_pub = self.create_publisher(PlanningScene, '/planning_scene', 10)
 
@@ -76,6 +83,11 @@ class EvaluationManager(Node):
             self.joint_state_callback,
             10
         )
+        # Flags/events for first data arrival
+        self.first_ee_pose_event = threading.Event()
+        self.first_distance_event = threading.Event()
+
+
         self.current_joint_state = None
         
         self.workspace_bounds = {'x': (0.2, 0.8), 'y': (-0.5, 0.5), 'z': (0.2, 0.8)}
@@ -149,6 +161,8 @@ class EvaluationManager(Node):
     def ee_pose_callback(self, msg):
         """Store the latest end-effector pose from distance calculator"""
         self.current_ee_pose = msg
+        # Signal we've seen at least one pose
+        self.first_ee_pose_event.set()
 
     def get_end_effector_position(self):
         """Get end-effector position from distance calculator"""
@@ -162,6 +176,22 @@ class EvaluationManager(Node):
         """Store the latest distance message for regular sampling"""
         with self.distance_data_lock:
             self.latest_distance_msg = msg
+        # Signal we've seen at least one distance packet
+        self.first_distance_event.set()
+
+    def wait_for_first_samples(self, timeout_sec=5.0):
+        """
+        Wait up to timeout_sec for the first /end_effector_pose and /closest_point messages.
+        Returns (got_pose, got_distance).
+        """
+        self.get_logger().info(f"Waiting for first /end_effector_pose and /closest_point messages (<= {timeout_sec:.1f}s)...")
+        got_pose = self.first_ee_pose_event.wait(timeout=timeout_sec)
+        got_dist = self.first_distance_event.wait(timeout=timeout_sec)
+        if not got_pose:
+            self.get_logger().warn("Did not receive an /end_effector_pose in time (will still continue).")
+        if not got_dist:
+            self.get_logger().warn("Did not receive a /closest_point message in time (will still continue).")
+        return got_pose, got_dist
 
     def joint_state_callback(self, msg):
         """Store the latest joint state data"""
@@ -246,7 +276,7 @@ class EvaluationManager(Node):
                 'link6': {'x': msg.frame6x, 'y': msg.frame6y, 'z': msg.frame6z},
                 'link7': {'x': msg.frame7x, 'y': msg.frame7y, 'z': msg.frame7z},
                 'hand': {'x': msg.framehandx, 'y': msg.framehandy, 'z': msg.framehandz},
-                'end_effector': {'x': msg.frameeex, 'y': msg.frameeey, 'z': msg.frameeez}
+                'hand_tcp': {'x': msg.frameeex, 'y': msg.frameeey, 'z': msg.frameeez}
             }
             for link_name, coords in links_data.items():
                 if len(coords['x']) > 0:
@@ -260,7 +290,7 @@ class EvaluationManager(Node):
             overall_min = min(min_distances.values()) if min_distances else float('inf')
             num_obstacles_detected = len(msg.frame2x)
         else:
-            for link_name in ['link2', 'link3', 'link4', 'link5', 'link6', 'link7', 'hand', 'end_effector']:
+            for link_name in ['link2', 'link3', 'link4', 'link5', 'link6', 'link7', 'hand', 'hand_tcp']:
                 min_distances[link_name] = float('inf')
         
         distance_entry = {
@@ -869,7 +899,7 @@ class EvaluationManager(Node):
             'link6': {'x': initial_distances.frame6x, 'y': initial_distances.frame6y, 'z': initial_distances.frame6z},
             'link7': {'x': initial_distances.frame7x, 'y': initial_distances.frame7y, 'z': initial_distances.frame7z},
             'hand': {'x': initial_distances.framehandx, 'y': initial_distances.framehandy, 'z': initial_distances.framehandz},
-            'end_effector': {'x': initial_distances.frameeex, 'y': initial_distances.frameeey, 'z': initial_distances.frameeez}
+            'hand_tcp': {'x': initial_distances.frameeex, 'y': initial_distances.frameeey, 'z': initial_distances.frameeez}
         }
         for link_name, coords in links_data.items():
             if len(coords['x']) > 0:
@@ -980,8 +1010,21 @@ class EvaluationManager(Node):
         self.curvature_values = []
         self.previous_direction = None
         sampling_interval = 1.0 / self.sampling_rate
-        self.sampling_timer = self.create_timer(sampling_interval, self.regular_sampling_callback)
+        try:
+            self._steady_clock = Clock(clock_type=ClockType.STEADY_TIME)
+            self.sampling_timer = self.create_timer(
+                sampling_interval,
+                self.regular_sampling_callback,
+                clock=self._steady_clock
+            )
+            self.get_logger().info("Sampling timer bound to STEADY_TIME clock.")
+        except TypeError:
+            # For older rclpy without 'clock=' kwarg, fall back to normal timer + wall watchdog
+            self.sampling_timer = self.create_timer(sampling_interval, self.regular_sampling_callback)
+            self.get_logger().warn("create_timer(clock=...) not supported; using default timer. "
+                                "Ensure use_sim_time is FALSE for this node.")
         self.get_logger().info(f"Started recording distance data at {self.sampling_rate} Hz (max {self.max_samples} samples)")
+
 
     def stop_recording(self):
         """Stop recording distance data"""
@@ -1118,9 +1161,34 @@ class EvaluationManager(Node):
         self.get_logger().info(f"Target position: [{target.position.x:.3f}, {target.position.y:.3f}, {target.position.z:.3f}]")
         self.get_logger().info("Robot can now freely approach target - no collision sphere around target")
         self.get_logger().info("Waiting briefly for robot state updates...")
-        time.sleep(1.0)
+        time.sleep(0.5)
+
+        # Ensure we actually have data before we begin logging
+        pose_ok, dist_ok = self.wait_for_first_samples(timeout_sec=5.0)
+
+        # Seed start position immediately if available
+        seed_pos = self.get_end_effector_position()
+        if seed_pos is not None:
+            self.start_ee_position = seed_pos.copy()
+            self.previous_ee_position = seed_pos.copy()
+            self.end_ee_position = seed_pos.copy()
+            self.path_positions = [seed_pos.copy()]
+            self.get_logger().info(
+                f"Seeded start position from first pose: [{seed_pos[0]:.3f}, {seed_pos[1]:.3f}, {seed_pos[2]:.3f}]"
+            )
+        else:
+            self.get_logger().warn("Could not seed start position (no EE pose yet). Will try during sampling.")
+
         self.start_recording()
-        exec_time = 15.0
+        watchdog_deadline = time.time() + 1.0
+        while time.time() < watchdog_deadline and len(self.distance_data) == 0:
+            rclpy.spin_once(self, timeout_sec=0.05)
+
+        if len(self.distance_data) == 0:
+            self.get_logger().warn("Sampling watchdog: still zero samples after 1s. "
+                                "This usually means the timer is tied to sim time or the executor isn't spinning.")
+
+        exec_time = 20.0
         self.get_logger().info(f"Monitoring for {exec_time} seconds.")
         
         end_time = time.time() + exec_time
@@ -1182,32 +1250,45 @@ class EvaluationManager(Node):
     def analyze_distance_data(self):
         """Analyze the collected distance data"""
         if not self.distance_data:
-            return {'error': 'No distance data collected'}
-        overall_distances = [entry['overall_min_distance'] for entry in self.distance_data if entry['overall_min_distance'] != float('inf')]
+            return {'note': 'No distance samples recorded (sampling timer never fired?)',
+                    'num_measurements': 0}
+
+        overall_distances = [
+            entry['overall_min_distance']
+            for entry in self.distance_data
+            if entry['overall_min_distance'] != float('inf')
+        ]
+
+        # If no finite distances, it usually means no obstacles were seen by the calculator
         if not overall_distances:
-            return {'error': 'No valid distance measurements'}
+            return {'note': 'No valid (finite) distance measurements observed; likely no obstacles detected by /closest_point',
+                    'num_measurements': 0}
+
         analysis = {
             'min_distance_achieved': min(overall_distances),
             'max_distance': max(overall_distances),
-            'avg_distance': np.mean(overall_distances),
-            'std_distance': np.std(overall_distances),
+            'avg_distance': float(np.mean(overall_distances)),
+            'std_distance': float(np.std(overall_distances)),
             'num_measurements': len(overall_distances),
             'close_calls': len([d for d in overall_distances if d < 0.05]),
             'safety_violations': len([d for d in overall_distances if d < 0.02])
         }
+
         link_analysis = {}
-        for link_name in ['link2', 'link3', 'link4', 'link5', 'link6', 'link7', 'hand', 'end_effector']:
+        for link_name in ['link2', 'link3', 'link4', 'link5', 'link6', 'link7', 'hand', 'hand_tcp']:
             link_distances = []
             for entry in self.distance_data:
-                if link_name in entry['link_distances'] and entry['link_distances'][link_name] != float('inf'):
-                    link_distances.append(entry['link_distances'][link_name])
+                d = entry['link_distances'].get(link_name, float('inf'))
+                if d != float('inf'):
+                    link_distances.append(d)
             if link_distances:
                 link_analysis[link_name] = {
                     'min_distance': min(link_distances),
-                    'avg_distance': np.mean(link_distances)
+                    'avg_distance': float(np.mean(link_distances))
                 }
         analysis['per_link_analysis'] = link_analysis
         return analysis
+
 
     def save_results(self, result):
         existing_data = {}

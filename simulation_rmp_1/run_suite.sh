@@ -29,7 +29,9 @@ do
     export RUN_DIR="$RUN_DIR"
     
     # Launch the ROS2 simulation
-    timeout 60s ros2 launch "$PACKAGE_NAME" "$LAUNCH_FILE"
+    timeout 60s ros2 launch "$PACKAGE_NAME" "$LAUNCH_FILE" \
+        load_gripper:=true \
+        franka_hand:='franka_hand'
 
     echo
     echo "=== Simulation $i finished. Restarting Gazebo & RViz for next simulation ==="
