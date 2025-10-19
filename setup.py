@@ -27,7 +27,8 @@ setup(
             'target_visualizer = simulation_rmp_1.target_visualizer:main',
             'master_evaluation_manager = simulation_rmp_1.master_evaluation_manager:main',
             'single_evaluation_manager = simulation_rmp_1.single_evaluation_manager:main',
-            'single_simulation_evaluation_manager_rmp = simulation_rmp_1.single_simulation_evaluation_manager_rmp:main'
+            'single_simulation_evaluation_manager_rmp = simulation_rmp_1.single_simulation_evaluation_manager_rmp:main',
+            'evaluation_manager_cartesian = simulation_rmp_1.evaluation_manager_cartesian:main',
         ],
     },
 )
