@@ -8,7 +8,7 @@ import gc
 import sys
 import os
 
-# python3 /home/matteo/franka_ros2_ws/src/simulation_rmp_1/scripts/analysis_simulations.py
+# python3 /home/matteo/franka_ros2_ws/src/simulation_rmp_1/scripts/analysis_simulations_cartesian.py
 
 # --------- tiny helpers (no psutil) ----------
 def available_ram_gb():
@@ -693,7 +693,7 @@ class SafeSimulationAnalyzer:
 
 def main():
     # change this default path if you want
-    json_file_path = "/home/matteo/Simulation_rmp/Run_1000_1_290925/evaluation_results_1000_1.json"
+    json_file_path = "/home/matteo/Simulation_cartesian/Run_20251019_145723/evaluation_results_with_distances.json"
 
     print("Starting ENHANCED simulation analysis...")
     try:

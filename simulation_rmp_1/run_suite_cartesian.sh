@@ -5,7 +5,7 @@
 
 #exec franka_ros2_ws/src/simulation_rmp_1/simulation_rmp_1/run_suite_cartesian.sh
 
-NUM_SIMULATIONS=3
+NUM_SIMULATIONS=5
 PACKAGE_NAME="simulation_rmp_1"                 # <-- change if your package name differs
 LAUNCH_FILE="simulation_cartesian_launch.py"
 
